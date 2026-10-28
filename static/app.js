@@ -48,6 +48,16 @@ function iconURL(kind, opt) {
 }
 const img = (kind, size, opt) => `<img src="${iconURL(kind, opt)}" width="${size}" height="${size}" alt="" style="image-rendering:pixelated">`;
 const resName = (r) => META.resources[r].name;
+const tileImg = (t, size) => `<img src="${tileURL(t)}" width="${size}" height="${size}" alt="" style="image-rendering:pixelated">`;
+const resImg = (r, size) => (RES_ICON[r] ? tileImg(RES_ICON[r], size) : img(r, size));
+function heroOf(pid) {
+  const i = Object.keys(S.members).indexOf(pid);
+  return HEROES[(i < 0 ? 0 : i) % HEROES.length];
+}
+function drawResIcon(c, r, x, y, size) {
+  if (RES_ICON[r]) drawTile(c, RES_ICON[r], x, y, size);
+  else c.drawImage(buildSprite(r), x, y, size, size);
+}
 function fmtDur(sec) {
   sec = Math.max(0, Math.round(sec));
   const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
@@ -65,6 +75,7 @@ function myMember() { return S && S.members[me]; }
 // ---------------- 접속 ----------------
 async function init() {
   META = await (await fetch('/api/meta')).json();
+  await loadSheets();
   $('#name').value = lsGet('name') || '';
   const q = new URLSearchParams(location.search).get('v');
   if (q) $('#code').value = q.toUpperCase();
@@ -255,7 +266,7 @@ function renderTop() {
   $('#v-online').textContent = `접속 ${online} / 주민 ${Object.keys(S.members).length}`;
   $('#resbar').innerHTML = Object.keys(META.resources).map((r) => {
     const v = S.res[r], cap = S.caps[r];
-    return `<span class="res ${v >= cap ? 'full' : ''}" title="${resName(r)} (최대 ${cap})">${img(r, 20)}
+    return `<span class="res ${v >= cap ? 'full' : ''}" title="${resName(r)} (최대 ${cap})">${resImg(r, 20)}
       <span><b>${v}</b><span class="muted">/${cap}</span><div class="bar"><div style="width:${Math.min(100, (v / cap) * 100)}%;background:${META.resources[r].color}"></div></div></span></span>`;
   }).join('');
   const warn = $('#storage-warn');
@@ -287,7 +298,7 @@ function renderSide() {
 }
 
 function costHTML(cost) {
-  return Object.entries(cost).map(([r, v]) => `<span class="${S.res[r] < v ? 'no' : ''}">${img(r, 14)}${v}</span>`).join('');
+  return Object.entries(cost).map(([r, v]) => `<span class="${S.res[r] < v ? 'no' : ''}">${resImg(r, 14)}${v}</span>`).join('');
 }
 
 function buildBlock(bid) {
@@ -359,7 +370,7 @@ function jobText(m) {
 function renderPeople() {
   const list = Object.entries(S.members).sort((a, b) => b[1].contrib - a[1].contrib);
   $('#tab-people').innerHTML = list.map(([pid, m], i) => `<div class="person">
-    ${img('villager', 28, { cloth: m.color })}
+    ${tileImg(heroOf(pid), 28)}
     <div class="info"><b>${i + 1}. ${esc(m.name)}</b>${pid === me ? ' (나)' : ''}
       <span class="${m.online ? 'on' : 'muted'}">${m.online ? '● 접속 중' : `· ${ago(m.last_seen)}`}</span>
       <div class="muted">${jobText(m)}</div>
@@ -370,8 +381,8 @@ function renderMe() {
   const m = myMember();
   if (!m) return;
   const smithy = S.buildings.smithy;
-  let h = `<div class="person">${img('villager', 40, { cloth: m.color })}<div class="info"><b>${esc(m.name)}</b>
-    <div>${img('gold', 14)} 동전 ${m.coins} · 기여도 ${m.contrib}</div>
+  let h = `<div class="person">${tileImg(heroOf(me), 40)}<div class="info"><b>${esc(m.name)}</b>
+    <div>${resImg('gold', 14)} 동전 ${m.coins} · 기여도 ${m.contrib}</div>
     ${S.buildings.dungeon ? `<div class="muted">행동력 ${Math.floor(m.energy)}/${META.energy_max} (${META.energy_regen / 60}분마다 1)</div>` : ''}</div></div>
     <h4>숙련도</h4><div class="skills">`;
   for (const [k, v] of Object.entries(m.skills)) {
@@ -382,7 +393,7 @@ function renderMe() {
     const lvl = m.tools[k];
     const price = META.tool_prices[lvl];
     const can = smithy && lvl < Math.min(META.tool_max, smithy) && m.coins >= price;
-    h += `<div class="tool">${img(k === 'weapon' ? 'ore' : k, 18)}<span class="nm">${name} <b>+${lvl}</b>
+    h += `<div class="tool">${k === 'weapon' ? tileImg(['dungeon', 103], 18) : resImg(k, 18)}<span class="nm">${name} <b>+${lvl}</b>
       <span class="muted">${k === 'weapon' ? '공격력 +4/단계' : '채집 +15%/단계'}</span></span>
       ${lvl < META.tool_max ? `<button class="btn small" data-buy="${k}" ${can ? '' : 'disabled'}>${price}동전</button>` : '<span class="muted">최대</span>'}</div>`;
   }
@@ -411,132 +422,159 @@ function buildMapCache() {
   mapCache.height = h * TS;
   const c = mapCache.getContext('2d');
   c.imageSmoothingEnabled = false;
-  const grass = (px, py, r) => {
-    c.fillStyle = r < 0.5 ? '#4f8a3c' : '#558f40';
-    c.fillRect(px, py, TS, TS);
-    if (r > 0.75) { c.fillStyle = '#67a64e'; c.fillRect(px + ((r * 97) | 0) % 26, py + ((r * 53) | 0) % 26, 2, 4); }
-    if (r < 0.05) { c.fillStyle = '#f5e27a'; c.fillRect(px + 12, py + 14, 3, 3); }
+  const pick = (arr, x, y) => arr[Math.floor(hash(x, y) * arr.length)];
+  const isWater = (x, y) => '~b='.includes(tileAt(x, y));
+  const isField = (x, y) => tileAt(x, y) === 'F';
+  const waterTile = (x, y) => {
+    const W_ = TILES.water;
+    const up = !isWater(x, y - 1), dn = !isWater(x, y + 1), lf = !isWater(x - 1, y), rt = !isWater(x + 1, y);
+    if (up && lf) return W_.tl;
+    if (up && rt) return W_.tr;
+    if (dn && lf) return W_.bl;
+    if (dn && rt) return W_.br;
+    if (up) return W_.t;
+    if (dn) return W_.b;
+    if (lf) return W_.l;
+    if (rt) return W_.r;
+    if (!isWater(x - 1, y - 1)) return W_.itl;
+    if (!isWater(x + 1, y - 1)) return W_.itr;
+    if (!isWater(x - 1, y + 1)) return W_.ibl;
+    if (!isWater(x + 1, y + 1)) return W_.ibr;
+    return W_.c;
   };
+  const tops = [];  // 큰 나무 윗부분은 나중에 (윗줄 위에) 그린다
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
-      const t = mapRows[y][x], px = x * TS, py = y * TS, r = hash(x, y);
-      if (t === '~' || t === 'b') {
-        c.fillStyle = '#2f6fa8'; c.fillRect(px, py, TS, TS);
-        c.fillStyle = '#3d82bd'; if (r > 0.5) c.fillRect(px + 4, py + 10, 10, 2);
-        if (t === 'b') { c.fillStyle = '#5a3a1a'; c.fillRect(px + 4, py + 4, 4, 24); c.fillRect(px + 24, py + 4, 4, 24); }
-      } else if (t === '=') {
-        c.fillStyle = '#2f6fa8'; c.fillRect(px, py, TS, TS);
-        c.fillStyle = '#8b5a2b'; c.fillRect(px, py + 2, TS, TS - 4);
-        c.fillStyle = '#6b4220'; for (let i = 0; i < TS; i += 8) c.fillRect(px + i, py + 2, 1, TS - 4);
-      } else if (t === ':' || t === 'm') {
-        c.fillStyle = r < 0.5 ? '#4a4452' : '#4e4856'; c.fillRect(px, py, TS, TS);
-        if (r > 0.8) { c.fillStyle = '#5c5566'; c.fillRect(px + 8, py + 18, 6, 3); }
-      } else if (t === ',') {
-        c.fillStyle = r < 0.5 ? '#b89a68' : '#bfa16e'; c.fillRect(px, py, TS, TS);
-        c.fillStyle = '#a88a5a'; if (r > 0.6) c.fillRect(px + 6, py + 20, 4, 3);
-      } else if (t === 'F') {
-        c.fillStyle = '#6b4a2b'; c.fillRect(px, py, TS, TS);
-        c.fillStyle = '#5a3d22'; for (let i = 4; i < TS; i += 8) c.fillRect(px, py + i, TS, 2);
-        c.fillStyle = '#8bc34a'; for (let i = 3; i < TS; i += 8) { c.fillRect(px + i, py + 6, 3, 4); c.fillRect(px + i + 2, py + 22, 3, 4); }
-      } else if (t === '#') {
-        c.fillStyle = '#2b4a24'; c.fillRect(px, py, TS, TS);
-        c.drawImage(buildSprite('tree'), px, py - 4, TS, TS);
-      } else {
-        grass(px, py, r);
+      const t = mapRows[y][x], px = x * TS, py = y * TS;
+      // 바닥
+      if (t === ':' || t === 'm') {
+        drawTile(c, pick(TILES.stoneFloor, x, y), px, py);
+        const r = hash(x + 7, y);
+        if (r > 0.6) { c.fillStyle = '#9aa3b5'; c.fillRect(px + ((r * 97) | 0) % 24 + 2, py + ((r * 53) | 0) % 22 + 4, 4, 3); }
+        if (r < 0.15) { c.fillStyle = '#b4bccb'; c.fillRect(px + 8, py + 20, 6, 2); }
       }
-      if (t === 'T') c.drawImage(buildSprite('tree'), px - 2, py - 10, TS + 4, TS + 6);
-      if (t === 'R') c.drawImage(buildSprite('rock'), px, py, TS, TS);
-      if (t === 'm') c.drawImage(buildSprite('orerock'), px, py, TS, TS);
+      else if (t === ',') drawTile(c, pick(TILES.dirt, x, y), px, py);
+      else if (isWater(x, y)) drawTile(c, waterTile(x, y), px, py);
+      else if (t === 'F') {
+        const F_ = TILES.field;
+        drawTile(c, TILES.grass[0], px, py);
+        drawTile(c, !isField(x - 1, y) ? F_.l : !isField(x + 1, y) ? F_.r : F_.m[x % 2], px, py);
+      } else drawTile(c, pick(TILES.grass, x, y), px, py);
+      // 위에 얹는 것
+      if (t === 'T' || t === '#') {
+        const tr = t === '#' ? TILES.trees[3] : pick(TILES.trees, x, y);
+        drawTile(c, tr, px, py);
+        const top = TILES.treeTop[tr[1]];
+        if (top && y > 0) tops.push([top, px, py - TS]);
+      } else if (t === 'R') drawTile(c, pick(TILES.rocks, x, y), px, py);
+      else if (t === 'm') {
+        drawTile(c, TILES.rocks[0], px, py);
+        const r = hash(x, y);
+        c.fillStyle = r < 0.5 ? '#ff9f1c' : '#c9b8ff';
+        c.fillRect(px + 10 + ((r * 31) | 0) % 8, py + 14, 4, 4);
+        c.fillRect(px + 18, py + 20 - ((r * 17) | 0) % 6, 3, 3);
+      } else if (t === 'F' && hash(x * 3, y) > 0.35) {
+        drawTile(c, TILES.crops[y % TILES.crops.length], px, py);
+      } else if (t === 'b' || t === '=') {
+        c.fillStyle = '#5a3a1a';
+        c.fillRect(px + 4, py + 2, 4, 28); c.fillRect(px + 24, py + 2, 4, 28);
+        if (t === '=') {
+          c.fillStyle = '#b07b45'; c.fillRect(px, py + 4, TS, TS - 8);
+          c.fillStyle = '#8b5a2b'; for (let i = 0; i < TS; i += 8) c.fillRect(px + i, py + 4, 2, TS - 8);
+          c.fillStyle = '#5a3a1a'; c.fillRect(px, py + 4, TS, 2); c.fillRect(px, py + TS - 6, TS, 2);
+        }
+      }
     }
+  }
+  for (const [tt, px, py] of tops) drawTile(c, tt, px, py);
+  makeAnimals();
+}
+
+// 농장 근처를 돌아다니는 동물 (화면 연출)
+let animals = [];
+function makeAnimals() {
+  animals = ANIMALS.map((t, i) => {
+    const x = 23 + hash(i, 9) * 8, y = 3 + hash(i, 4) * 8;
+    return { t, x, y, tx: x, ty: y, wait: 0, flip: false };
+  });
+}
+function updateAnimals(dt) {
+  for (const a of animals) {
+    if (a.wait > 0) { a.wait -= dt; continue; }
+    const dx = a.tx - a.x, dy = a.ty - a.y, d = Math.hypot(dx, dy);
+    if (d < 0.05) {
+      a.wait = 1000 + Math.random() * 4000;
+      a.tx = Math.min(31, Math.max(22, a.x + (Math.random() - 0.5) * 4));
+      a.ty = Math.min(11, Math.max(3, a.y + (Math.random() - 0.5) * 3));
+      if (!'.F'.includes(tileAt(Math.floor(a.tx), Math.floor(a.ty)))) { a.tx = a.x; a.ty = a.y; }
+      continue;
+    }
+    const sp = Math.min(d, dt / 1000 * 1.2);
+    a.x += dx / d * sp; a.y += dy / d * sp;
+    a.flip = dx < 0;
   }
 }
 
 // 건물 그리기 (레벨 0이면 공터 표지판)
-const BCOL = {
-  hall: ['#b5473a', '#e8d9b5'], warehouse: ['#7a4a26', '#a8743f'], smithy: ['#4a4a55', '#8a8a95'],
-  inn: ['#3b5fa8', '#e8d9b5'], tower: ['#6b6b75', '#9a9aa5'], lumber: ['#3e7d32', '#a8743f'],
-  quarry: ['#6b6b75', '#c2b49a'], farm: ['#b5473a', '#c99a5a'], mine: ['#3a3440', '#6b5f75'],
-  dungeon: ['#2a1a35', '#5a3a6a'],
-};
-
 function drawBuilding(bid, t) {
+  const art = BUILD_ART[bid];
   const [bx, by] = META.building_pos[bid];
   const lvl = S.buildings[bid];
   const cons = S.construction && S.construction.id === bid;
-  const px = bx * TS - Math.round(cam.x) + TS / 2, py = (by + 1) * TS - Math.round(cam.y);
-  if (px < -100 || px > W + 100 || py < -100 || py > H + 140) return;
-  if (bid === 'bridge') { if (lvl || cons) label(bid, px, py - TS - 4, lvl); return; }
-  if (!lvl && !cons) {
-    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-    ctx.setLineDash([4, 4]);
-    ctx.strokeRect(px - TS, py - TS * 1.6, TS * 2, TS * 1.6);
-    ctx.setLineDash([]);
-    ctx.fillStyle = '#7a4a26'; ctx.fillRect(px - 2, py - 26, 4, 22);
-    ctx.fillStyle = '#c99a5a'; ctx.fillRect(px - 14, py - 34, 28, 12);
-    ctx.font = FONT(9); ctx.textAlign = 'center'; ctx.fillStyle = '#3a2410'; ctx.fillText('공터', px, py - 25);
-    label(bid, px, py - TS * 1.6 - 6, 0, true);
+  if (bid === 'bridge') {
+    if (lvl || cons) label(bid, bx * TS - Math.round(cam.x) + TS / 2, by * TS - Math.round(cam.y) - 6, lvl);
     return;
   }
-  const [roof, wall] = BCOL[bid] || ['#888', '#ccc'];
-  const sc = 1 + Math.min(lvl, 6) * 0.06;
-  const w = TS * 1.8 * sc, hgt = TS * 1.1 * sc;
-  ctx.fillStyle = 'rgba(0,0,0,0.3)';
-  ctx.fillRect(px - w / 2 + 4, py - 4, w, 8);
-  if (bid === 'fountain') {
-    ctx.fillStyle = '#9a9aa5'; ctx.beginPath(); ctx.ellipse(px, py - 10, 26 * sc, 12 * sc, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#4fa3e0'; ctx.beginPath(); ctx.ellipse(px, py - 11, 20 * sc, 8 * sc, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#c9e8ff';
-    for (let i = 0; i < 6; i++) { const a = t / 300 + i; ctx.fillRect(px + Math.cos(a) * 6, py - 22 - Math.abs(Math.sin(a * 2)) * 10, 2, 2); }
-    ctx.fillStyle = '#8a8a95'; ctx.fillRect(px - 3, py - 30, 6, 18);
-  } else if (bid === 'tower') {
-    ctx.fillStyle = wall; ctx.fillRect(px - 12, py - 70, 24, 70);
-    ctx.fillStyle = roof; ctx.fillRect(px - 16, py - 76, 32, 10);
-    for (let i = 0; i < 4; i++) ctx.fillRect(px - 16 + i * 9, py - 82, 5, 6);
-    ctx.fillStyle = '#1a1423'; ctx.fillRect(px - 3, py - 50, 6, 10);
-  } else if (bid === 'mine' || bid === 'dungeon') {
-    ctx.fillStyle = wall; ctx.beginPath(); ctx.moveTo(px - w / 2, py); ctx.lineTo(px - w / 4, py - hgt * 1.4); ctx.lineTo(px + w / 4, py - hgt * 1.5); ctx.lineTo(px + w / 2, py); ctx.fill();
-    ctx.fillStyle = '#0a0810'; ctx.beginPath(); ctx.arc(px, py, 14 * sc, Math.PI, 0); ctx.fill();
-    if (bid === 'dungeon') {
-      ctx.fillStyle = `rgba(160,80,255,${0.3 + Math.sin(t / 300) * 0.15})`;
-      ctx.beginPath(); ctx.arc(px, py - 4, 18 * sc, Math.PI, 0); ctx.fill();
-      ctx.fillStyle = '#e8e8e8'; ctx.fillRect(px - 4, py - hgt * 1.2, 8, 7); ctx.fillStyle = '#1a1423'; ctx.fillRect(px - 3, py - hgt * 1.2 + 2, 2, 2); ctx.fillRect(px + 1, py - hgt * 1.2 + 2, 2, 2);
-    } else {
-      ctx.fillStyle = '#8b5a2b'; ctx.fillRect(px - 16 * sc, py - 16 * sc, 4, 16 * sc); ctx.fillRect(px + 12 * sc, py - 16 * sc, 4, 16 * sc); ctx.fillRect(px - 16 * sc, py - 18 * sc, 32 * sc, 4);
-    }
-  } else {
-    // 일반 건물: 벽 + 지붕 + 문
-    ctx.fillStyle = wall; ctx.fillRect(px - w / 2, py - hgt, w, hgt);
-    ctx.fillStyle = 'rgba(0,0,0,0.15)'; ctx.fillRect(px - w / 2, py - hgt, w, 4);
-    ctx.fillStyle = roof;
-    ctx.beginPath(); ctx.moveTo(px - w / 2 - 6, py - hgt + 2); ctx.lineTo(px, py - hgt - TS * 0.9 * sc); ctx.lineTo(px + w / 2 + 6, py - hgt + 2); ctx.fill();
-    ctx.fillStyle = '#4a2c14'; ctx.fillRect(px - 6, py - 18, 12, 18);
-    ctx.fillStyle = '#ffe27a';
-    if (w > 60) { ctx.fillRect(px - w / 2 + 8, py - hgt + 10, 9, 9); ctx.fillRect(px + w / 2 - 17, py - hgt + 10, 9, 9); }
-    if (bid === 'hall') {
-      ctx.fillStyle = '#5a3a1a'; ctx.fillRect(px - 1, py - hgt - TS * 0.9 * sc - 16, 2, 18);
-      ctx.fillStyle = '#9be15d'; ctx.fillRect(px + 1, py - hgt - TS * 0.9 * sc - 16, 12 + Math.sin(t / 200) * 2, 7);
-    }
-    if (bid === 'smithy') {
-      ctx.fillStyle = '#3a3a44'; ctx.fillRect(px + w / 4, py - hgt - 20, 8, 22);
-      ctx.fillStyle = 'rgba(200,200,200,0.4)';
-      for (let i = 0; i < 3; i++) { const k = ((t / 1500 + i / 3) % 1); ctx.beginPath(); ctx.arc(px + w / 4 + 4 + k * 8, py - hgt - 24 - k * 26, 3 + k * 5, 0, Math.PI * 2); ctx.fill(); }
-    }
-    if (bid === 'lumber') { ctx.fillStyle = '#8b5a2b'; for (let i = 0; i < 3; i++) ctx.fillRect(px + w / 2 + 2, py - 8 - i * 6, 18, 5); }
-    if (bid === 'quarry') { ctx.fillStyle = '#9a9aa5'; ctx.fillRect(px + w / 2 + 2, py - 10, 14, 10); ctx.fillRect(px + w / 2 + 6, py - 16, 10, 7); }
-    if (bid === 'warehouse') { ctx.strokeStyle = '#4a2c14'; ctx.lineWidth = 2; ctx.strokeRect(px - 10, py - 22, 20, 22); ctx.beginPath(); ctx.moveTo(px - 10, py - 22); ctx.lineTo(px + 10, py); ctx.moveTo(px + 10, py - 22); ctx.lineTo(px - 10, py); ctx.stroke(); }
-    if (bid === 'dock') { ctx.fillStyle = '#8b5a2b'; ctx.fillRect(px + 10, py - 6, 40, 8); }
-    if (bid === 'farm') { ctx.fillStyle = '#e8d9b5'; ctx.fillRect(px - 4, py - hgt - 8, 8, 8); }
+  const w = art.rows[0].length, rows = art.rows.length;
+  const left = (w % 2 ? bx - Math.floor(w / 2) : bx) * TS - Math.round(cam.x);
+  const bottom = (by + 1) * TS - Math.round(cam.y);
+  const top = bottom - rows * TS;
+  const cxp = left + (w * TS) / 2;
+  if (left < -140 || left > W + 100 || bottom < -40 || top > H + 60) return;
+  if (!lvl && !cons) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+    ctx.setLineDash([4, 4]);
+    ctx.strokeRect(left + 2, bottom - TS * Math.min(rows, 2) + 2, w * TS - 4, TS * Math.min(rows, 2) - 4);
+    ctx.setLineDash([]);
+    drawTile(ctx, TILES.sign, cxp - TS / 2, bottom - TS);
+    label(bid, cxp, bottom - TS * Math.min(rows, 2) - 6, 0, true);
+    return;
   }
+  if (cons) ctx.globalAlpha = 0.45 + 0.5 * (1 - S.construction.left / S.construction.total);
+  if (art.glow) {
+    const g = ctx.createRadialGradient(cxp, bottom - TS, 4, cxp, bottom - TS, 70);
+    g.addColorStop(0, `rgba(160,80,255,${0.35 + Math.sin(t / 300) * 0.12})`);
+    g.addColorStop(1, 'rgba(160,80,255,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(cxp - 70, bottom - TS - 70, 140, 140);
+  }
+  if (art.pier) {
+    ctx.fillStyle = '#8b5a2b'; ctx.fillRect(cxp - 10, bottom - 14, 56, 12);
+    ctx.fillStyle = '#5a3a1a'; for (let i = 0; i < 56; i += 8) ctx.fillRect(cxp - 10 + i, bottom - 14, 1, 12);
+    ctx.fillRect(cxp + 40, bottom - 4, 4, 10);
+  }
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  ctx.fillRect(left + 4, bottom - 4, w * TS, 6);
+  art.rows.forEach((row, ri) => row.forEach((tt, ci) => drawTile(ctx, tt, left + ci * TS, top + ri * TS)));
+  for (const e of art.extra || []) drawTile(ctx, e.t, cxp - TS / 2 + e.dx * TS, bottom - TS + e.dy * TS);
+  if (art.smoke) {
+    ctx.fillStyle = 'rgba(220,220,220,0.45)';
+    for (let i = 0; i < 3; i++) {
+      const k = (t / 1600 + i / 3) % 1;
+      ctx.beginPath(); ctx.arc(left + TS * 2 - 6 + k * 10, top - k * 30, 3 + k * 5, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  ctx.globalAlpha = 1;
   if (cons) {
     ctx.strokeStyle = '#c99a5a'; ctx.lineWidth = 2;
-    for (let i = -1; i <= 1; i++) { ctx.beginPath(); ctx.moveTo(px + i * 20, py); ctx.lineTo(px + i * 20, py - hgt - 20); ctx.stroke(); }
-    for (let j = 0; j < 3; j++) { ctx.beginPath(); ctx.moveTo(px - 24, py - j * 18 - 6); ctx.lineTo(px + 24, py - j * 18 - 6); ctx.stroke(); }
-    const c = S.construction, k = 1 - c.left / c.total;
-    ctx.fillStyle = '#000'; ctx.fillRect(px - 24, py + 4, 48, 6);
-    ctx.fillStyle = '#5fbf4f'; ctx.fillRect(px - 24, py + 4, 48 * k, 6);
+    for (let i = 0; i <= w; i++) { ctx.beginPath(); ctx.moveTo(left + i * TS, bottom); ctx.lineTo(left + i * TS, top - 6); ctx.stroke(); }
+    for (let j = 0; j <= rows; j++) { ctx.beginPath(); ctx.moveTo(left - 4, bottom - j * TS); ctx.lineTo(left + w * TS + 4, bottom - j * TS); ctx.stroke(); }
+    const k = 1 - S.construction.left / S.construction.total;
+    ctx.fillStyle = '#000'; ctx.fillRect(cxp - 30, bottom + 4, 60, 6);
+    ctx.fillStyle = '#5fbf4f'; ctx.fillRect(cxp - 30, bottom + 4, 60 * k, 6);
     if (Math.random() < 0.05) burst(bx + Math.random() - 0.5, by - 0.5, '#c99a5a', 2);
   }
-  label(bid, px, py - hgt - TS * 0.9 * sc - 6, lvl);
+  label(bid, cxp, top - (art.extra || []).some((e) => e.dy <= -rows) * TS - 6, lvl);
 }
 
 function label(bid, x, y, lvl, dim) {
@@ -813,12 +851,7 @@ function draw(t, dt) {
   ctx.fillRect(0, 0, W, H);
   ctx.drawImage(mapCache, -cx, -cy);
 
-  // 물결
-  ctx.fillStyle = 'rgba(200,230,255,0.25)';
-  for (let i = 0; i < 30; i++) {
-    const x = Math.floor(hash(i, 7) * mapRows[0].length), y = Math.floor(hash(i, 3) * mapRows.length);
-    if (tileAt(x, y) === '~') ctx.fillRect(sx(x) + 6 + Math.sin(t / 500 + i) * 6, sy(y) + 14, 10, 2);
-  }
+  updateAnimals(dt);
 
   // 건물 + 사람 + 몬스터를 y 순서로
   const ents = [];
@@ -831,6 +864,7 @@ function draw(t, dt) {
     const r = lerp(mo.id, mo.x, mo.y, dt);
     ents.push({ y: r.y, f: () => drawMonster(mo, r, sx, sy, t) });
   }
+  for (const a of animals) ents.push({ y: a.y - 0.5, f: () => drawAnimal(a, sx, sy, t) });
   if (S.boss) {
     const [bx, by] = META.building_pos.dungeon;
     ents.push({ y: by + 1.5, f: () => drawBoss(bx, by + 1, sx, sy, t) });
@@ -869,14 +903,14 @@ function drawVillager(pid, m, r, sx, sy, t) {
   ctx.fillStyle = 'rgba(0,0,0,0.3)';
   ctx.beginPath(); ctx.ellipse(px + 16, py + 29, 9, 3, 0, 0, Math.PI * 2); ctx.fill();
   ctx.globalAlpha = m.online ? 1 : 0.55;
-  ctx.drawImage(buildSprite('villager', { cloth: m.color }), px, py + bob, TS, TS);
+  drawTile(ctx, heroOf(pid), px, py + bob);
   // 하는 일 표시
   if (working) {
     const swing = m.online ? Math.sin(t / 150) * 0.6 : 0.2;
     ctx.save();
     ctx.translate(px + 26, py + 16);
     ctx.rotate(swing);
-    ctx.drawImage(buildSprite(m.job.res), -6, -14, 14, 14);
+    drawResIcon(ctx, m.job.res, -6, -14, 14);
     ctx.restore();
   }
   ctx.globalAlpha = 1;
@@ -899,16 +933,30 @@ function drawMonster(mo, r, sx, sy, t) {
   const flash = flashAt[mo.id] && t - flashAt[mo.id] < 100;
   ctx.fillStyle = 'rgba(0,0,0,0.3)';
   ctx.beginPath(); ctx.ellipse(px + 16, py + 29, 9, 3, 0, 0, Math.PI * 2); ctx.fill();
-  ctx.drawImage(buildSprite(mo.kind, { flash }), px, py + Math.sin(t / 200 + px) * 1.5, TS, TS);
+  if (flash) ctx.filter = 'brightness(3)';
+  drawTile(ctx, MONSTER_TILE[mo.kind] || MONSTER_TILE.wolf, px, py + Math.sin(t / 200 + px) * 1.5);
+  ctx.filter = 'none';
   ctx.fillStyle = '#000'; ctx.fillRect(px + 2, py - 4, 28, 4);
   ctx.fillStyle = '#e0524a'; ctx.fillRect(px + 2, py - 4, 28 * Math.max(0, mo.hp / mo.max_hp), 4);
+}
+
+function drawAnimal(a, sx, sy, t) {
+  const px = sx(a.x - 0.5), py = sy(a.y - 0.5);
+  if (px < -40 || px > W + 40 || py < -40 || py > H + 40) return;
+  const bob = a.wait > 0 ? 0 : -Math.abs(Math.sin(t / 120)) * 2;
+  ctx.save();
+  if (a.flip) { ctx.translate(px + TS, 0); ctx.scale(-1, 1); drawTile(ctx, a.t, 0, py + bob); }
+  else drawTile(ctx, a.t, px, py + bob);
+  ctx.restore();
 }
 
 function drawBoss(bx, by, sx, sy, t) {
   const px = sx(bx) - TS * 0.5, py = sy(by) - TS;
   const flash = flashAt.boss && t - flashAt.boss < 100;
   const size = TS * 2;
-  ctx.drawImage(buildSprite('troll', { flash }), px, py + Math.sin(t / 400) * 2, size, size);
+  if (flash) ctx.filter = 'brightness(3)';
+  drawTile(ctx, MONSTER_TILE.troll, px, py + Math.sin(t / 400) * 2, size);
+  ctx.filter = 'none';
   const w = 70;
   ctx.fillStyle = '#000'; ctx.fillRect(px + size / 2 - w / 2, py - 8, w, 6);
   ctx.fillStyle = '#ff3b2f'; ctx.fillRect(px + size / 2 - w / 2, py - 8, w * Math.max(0, S.boss.hp / S.boss.max_hp), 6);
@@ -936,7 +984,7 @@ function drawFx(cx, cy, t) {
     ctx.globalAlpha = 1 - age * age;
     ctx.font = FONT(f.size);
     const x = f.x - cx, y = f.y - cy - age * 28;
-    if (f.icon) ctx.drawImage(buildSprite(f.icon), x - ctx.measureText(f.text).width / 2 - 16, y - 12, 14, 14);
+    if (f.icon) drawResIcon(ctx, f.icon, x - ctx.measureText(f.text).width / 2 - 16, y - 12, 14);
     ctx.fillStyle = '#000'; ctx.fillText(f.text, x + 1, y + 1);
     ctx.fillStyle = f.color; ctx.fillText(f.text, x, y);
   }
@@ -1020,7 +1068,7 @@ function drawHud(t) {
     return;
   }
   const j = m.job, left = j.end - now();
-  ctx.drawImage(buildSprite(j.res), x + 8, y + 10, 40, 40);
+  drawResIcon(ctx, j.res, x + 8, y + 10, 40);
   ctx.font = FONT(13); ctx.fillStyle = '#ece8f2';
   ctx.fillText(`${VERB[j.res]} 중 · 분당 ${j.rate}개`, x + 56, y + 22);
   ctx.font = FONT(11); ctx.fillStyle = '#9c95ad';

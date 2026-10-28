@@ -130,7 +130,18 @@ BUILDING_POS = {
     "dock": (21, 23), "farm": (26, 12), "bridge": (34, BRIDGE_Y), "mine": (38, 11),
     "dungeon": (41, 5),
 }
+# 건물 그림 너비(칸). 아랫줄 칸들은 지나갈 수 없다. 0이면 길을 막지 않음(다리)
+BUILDING_W = {"hall": 3, "warehouse": 3, "smithy": 3, "inn": 3, "lumber": 3, "quarry": 3, "farm": 3,
+              "dungeon": 3, "mine": 2, "tower": 1, "fountain": 1, "dock": 1, "bridge": 0}
 SPAWN = (17, 18)
+
+
+def building_tiles(bid):
+    """건물이 차지하는(막는) 칸 목록."""
+    x, y = BUILDING_POS[bid]
+    w = BUILDING_W[bid]
+    left = x - (w // 2) if w % 2 else x
+    return [(left + i, y) for i in range(w)]
 
 
 def make_map():
@@ -179,12 +190,13 @@ def make_map():
     for y in range(5, BRIDGE_Y):
         g[y][40] = ","
     # 건물 자리는 비워둔다
-    for bx, by in BUILDING_POS.values():
-        if g[by][bx] != "b":
+    for bid in BUILDING_POS:
+        for bx, by in building_tiles(bid):
             g[by][bx] = "B"
-            for dx, dy in ((1, 0), (0, 1), (-1, 0), (0, -1), (1, 1), (-1, 1)):
-                if g[by + dy][bx + dx] in "TRm":
-                    g[by + dy][bx + dx] = ":" if bx > RIVER_X[1] else "."
+            for dx in (-1, 0, 1):          # 건물 주변(지붕 쪽 포함)은 비워서 가리지 않게
+                for dy in (-2, -1, 0, 1):
+                    if g[by + dy][bx + dx] in "TRm":
+                        g[by + dy][bx + dx] = ":" if bx > RIVER_X[1] else "."
     sx, sy = SPAWN
     g[sy][sx] = ","
     return ["".join(r) for r in g]

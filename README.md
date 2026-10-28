@@ -48,5 +48,11 @@ uvicorn main:app --reload --port 8000
 | `village/world.py` | 마을 규칙 (채집, 건설, 습격, 보스, 지난 시간 따라잡기) |
 | `village/db.py` | 저장소 (Postgres 또는 SQLite) |
 | `main.py` | 마을 불러오기/저장/내리기, WebSocket |
-| `static/sprites.js` | 16x16 도트 스프라이트 |
+| `static/tiles.js` | Kenney 타일 시트 로딩, 지형·건물·캐릭터 타일 배치 |
+| `static/sprites.js` | Kenney에 없는 아이콘(물고기, 수정 등) 도트 |
 | `static/app.js` | 지도·건물 렌더링, 낮/밤, 입력, 사이드 패널 |
+
+## 그래픽
+
+`static/assets/`의 타일 이미지는 Kenney(www.kenney.nl)의 Tiny Town, Tiny Dungeon, Tiny Farm, Tiny Battle 에셋이다.
+CC0 라이선스라 자유롭게 사용 가능 (`static/assets/LICENSE-kenney.txt`). 물고기·수정 아이콘과 다리 등 일부는 코드로 직접 그린다.
