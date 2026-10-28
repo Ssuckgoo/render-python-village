@@ -18,7 +18,8 @@ from village.world import BASE_MAP, Village, VillageError, new_village
 log = logging.getLogger("village")
 STATIC = Path(__file__).parent / "static"
 MOVE_TICK = 0.2
-SAVE_EVERY = 30
+SAVE_EVERY = 600       # 접속 중 저장 주기. 길게 잡아야 Neon 같은 서버리스 DB가 그 사이에 쉰다
+HOUSEKEEP_EVERY = 60
 UNLOAD_AFTER = 180
 CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
@@ -29,6 +30,7 @@ class Room:
         self.lock = asyncio.Lock()
         self.sockets = {}            # pid -> WebSocket
         self.last_active = time.time()
+        self.last_save = time.time()
         self.last_state = 0.0
         self.task = None
 
@@ -52,6 +54,11 @@ class Room:
         elif v.moved or v.ev:
             await self.broadcast({"t": "tk", **v.positions()})
             v.ev, v.moved = [], False
+        fixes, v.corrections = v.corrections, []
+        for pid, x, y in fixes:
+            ws = self.sockets.get(pid)
+            if ws:
+                await self.send(ws, {"t": "you", "x": x, "y": y})
         msgs, v.messages = v.messages, []
         for pid, text in msgs:
             ws = self.sockets.get(pid)
@@ -98,19 +105,21 @@ async def get_room(code):
 
 async def save_room(room):
     room.v.save_dirty = False
+    room.last_save = time.time()
     await asyncio.to_thread(db.save, room.v.d["code"], room.v.d)
 
 
 async def housekeeping():
     """주기적 저장 + 빈 마을은 메모리에서 내린다."""
     while True:
-        await asyncio.sleep(SAVE_EVERY)
+        await asyncio.sleep(HOUSEKEEP_EVERY)
         now = time.time()
         for code, room in list(rooms.items()):
             try:
                 async with room.lock:
                     room.v.step(now)
-                    if room.v.save_dirty:
+                    due = now - room.last_save >= SAVE_EVERY or not room.sockets
+                    if room.v.save_dirty and due:
                         await save_room(room)
                 if not room.sockets and now - room.last_active > UNLOAD_AFTER:
                     async with rooms_lock:
@@ -199,6 +208,7 @@ async def ws_endpoint(ws: WebSocket, code: str):
 
     v = room.v
     async with room.lock:
+        is_new = hello.get("token") not in v.d["tokens"]
         pid, token = v.join(str(hello.get("name", "")).strip(), hello.get("token"))
         old = room.sockets.get(pid)
         if old:
@@ -212,7 +222,8 @@ async def ws_endpoint(ws: WebSocket, code: str):
         v.step(time.time())
         await ws.send_json({"t": "welcome", "you": pid, "token": token, "chat": v.d["chat"][-50:]})
         await room.flush(force=True)
-        await save_room(room)
+        if is_new:  # 새 주민은 바로 저장
+            await save_room(room)
 
     try:
         while True:
@@ -231,6 +242,8 @@ async def ws_endpoint(ws: WebSocket, code: str):
                     continue
                 if msg.get("t") == "chat":
                     await room.broadcast({"t": "chat", "line": result})
+                elif msg.get("t") == "pos":
+                    continue  # 위치는 틱 루프가 모아서 방송
                 else:
                     await room.flush(force=msg.get("t") in ("build", "buy"))
     except (WebSocketDisconnect, RuntimeError):
@@ -242,16 +255,17 @@ async def ws_endpoint(ws: WebSocket, code: str):
                 v.connect(pid, False)
                 room.last_active = time.time()
                 await room.flush(force=True)
+                if not room.sockets:  # 마지막 사람이 나가면 바로 저장
+                    v.step(time.time())
+                    await save_room(room)
 
 
 def handle(v: Village, pid: str, msg: dict):
     t = msg.get("t")
     now = time.time()
     v.step(now)
-    if t == "move":
-        return v.move(pid, int(msg["x"]), int(msg["y"]), now)
-    if t == "dir":
-        return v.set_dir(pid, int(msg["dx"]), int(msg["dy"]), now)
+    if t == "pos":
+        return v.set_pos(pid, float(msg["x"]), float(msg["y"]), now)
     if t == "gather":
         return v.gather(pid, int(msg["x"]), int(msg["y"]), now)
     if t == "work":

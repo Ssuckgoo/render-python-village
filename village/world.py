@@ -4,6 +4,7 @@ d(dict)가 DB에 저장되는 전부다. 접속 중인 사람의 이동 경로 �
 시간은 time.time() 기준 초. step(now)는 마지막 계산 이후 흐른 시간을 한 번에 처리하므로
 서버가 잠들어 있던 시간도 깨어날 때 따라잡는다.
 """
+import math
 import random
 import secrets
 import time
@@ -11,7 +12,7 @@ from collections import deque
 
 from .data import (ACTIVE_AMOUNT, ACTIVE_COOLDOWN, ATTACK_COOLDOWN, BOSS_GROWTH, BOSS_HP, BUILDING_POS,
                    BUILDINGS, COIN_PER_UNIT, ENERGY_MAX, ENERGY_REGEN, GATHER, JOBS, MAP_H, MAP_W,
-                   OFFLINE_CAP, RAID_DURATION, RAID_INTERVAL, RAID_MIN_LEVEL, RAID_MONSTERS, RAID_STEAL,
+                   OFFLINE_CAP, PLAYER_SPEED, RAID_DURATION, RAID_INTERVAL, RAID_MIN_LEVEL, RAID_MONSTERS, RAID_STEAL,
                    RESOURCES, SKILL_BONUS, SPAWN, TILE_RES, TOGETHER_BONUS, TOOL_BONUS, TOOL_MAX,
                    TOOLS, TOWER_DPS, WALKABLE, build_cost, build_seconds, make_map, skill_level,
                    tool_price, warehouse_cap)
@@ -21,6 +22,7 @@ COLORS = ["#e0524a", "#5b8cff", "#5fbf4f", "#f5c542", "#c06bff", "#ff9f1c", "#4f
 LOG_SIZE = 80
 CHAT_SIZE = 100
 BASE_MAP = make_map()
+RADIUS = 0.3
 DIRS8 = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)]
 
 
@@ -46,10 +48,9 @@ class Village:
     def __init__(self, d):
         self.d = d
         self.online = set()
-        self.paths = {}          # pid -> [(x, y), ...]
-        self.pending = {}        # pid -> {"res", "x", "y"} 도착하면 시작할 일
+        self.last_pos = {}       # pid -> (x, y, 시각) 위치 검증용
+        self.corrections = []    # (pid, x, y) 위치를 되돌려야 하는 사람
         self.target = {}         # pid -> 몬스터 id 또는 "boss"
-        self.dirs = {}           # pid -> (dx, dy) 키보드로 누르고 있는 방향
         self.cd = {}             # (pid, 종류) -> 다음 가능 시각
         self.ev = []             # 화면 연출용 이벤트
         self.moved = False
@@ -58,6 +59,11 @@ class Village:
         self.messages = []       # (pid, text) 개인 알림
         self.rng = random.Random()
         self.rebuild_map()
+        for m in d["members"].values():  # 예전 저장본(정수 칸 좌표) -> 칸 중심 좌표
+            if isinstance(m["x"], int):
+                m["x"], m["y"] = m["x"] + 0.5, m["y"] + 0.5
+            if m["job"] and "sx" not in m["job"]:
+                m["job"]["sx"], m["job"]["sy"] = int(m["x"]), int(m["y"])
 
     # ---------- 지도 ----------
     def rebuild_map(self):
@@ -76,6 +82,12 @@ class Village:
 
     def walkable(self, x, y):
         return self.tile(x, y) in WALKABLE
+
+    def free(self, x, y, r=RADIUS):
+        """중심 (x, y), 반경 r인 캐릭터가 벽과 겹치지 않는지."""
+        w = self.walkable
+        return (w(int(x - r), int(y - r)) and w(int(x + r), int(y - r))
+                and w(int(x - r), int(y + r)) and w(int(x + r), int(y + r)))
 
     def path(self, src, dst, limit=6000):
         if src == dst:
@@ -104,18 +116,6 @@ class Village:
             out.append(cur)
             cur = prev[cur]
         return out[::-1]
-
-    def stand_path(self, frm, tx, ty):
-        """자원 타일 (tx, ty) 옆(밭은 그 위)의 갈 수 있는 칸까지 경로. 없으면 None."""
-        if self.tile(tx, ty) == "F":
-            return self.path(frm, (tx, ty))
-        cands = [(tx + dx, ty + dy) for dx, dy in DIRS8 if self.walkable(tx + dx, ty + dy)]
-        cands.sort(key=lambda c: (c[0] - frm[0]) ** 2 + (c[1] - frm[1]) ** 2)
-        for c in cands:
-            p = self.path(frm, c)
-            if p is not None:
-                return p
-        return None
 
     # ---------- 공통 ----------
     def log(self, text, now=None):
@@ -155,7 +155,7 @@ class Village:
         d["members"][pid] = {
             "name": name[:10] or "주민", "color": COLORS[len(d["members"]) % len(COLORS)],
             "skills": {k: 0 for k in GATHER + ["combat"]}, "contrib": 0, "coins": 0.0,
-            "tools": {k: 0 for k in TOOLS}, "job": None, "x": SPAWN[0], "y": SPAWN[1],
+            "tools": {k: 0 for k in TOOLS}, "job": None, "x": SPAWN[0] + 0.5, "y": SPAWN[1] + 0.5,
             "energy": ENERGY_MAX, "energy_t": now, "boss_dmg": 0, "joined": now, "last_seen": now,
         }
         d["tokens"][token] = pid
@@ -168,10 +168,8 @@ class Village:
             self.online.add(pid)
         else:
             self.online.discard(pid)
-            self.paths.pop(pid, None)
-            self.pending.pop(pid, None)
+            self.last_pos.pop(pid, None)
             self.target.pop(pid, None)
-            self.dirs.pop(pid, None)
         m["last_seen"] = time.time()
         self.dirty = self.save_dirty = True
 
@@ -222,7 +220,8 @@ class Village:
         if res == "ore" and self.d["buildings"]["mine"] <= 0:
             raise VillageError("광산을 먼저 지어야 합니다.")
         cap = OFFLINE_CAP + 3600 * self.d["buildings"]["inn"]
-        m["job"] = {"res": res, "tx": tx, "ty": ty, "t": now, "end": now + cap, "acc": 0.0, "total": 0}
+        m["job"] = {"res": res, "tx": tx, "ty": ty, "t": now, "end": now + cap, "acc": 0.0, "total": 0,
+                    "sx": int(m["x"]), "sy": int(m["y"])}
         self.dirty = self.save_dirty = True
 
     def stop_job(self, pid, now):
@@ -266,44 +265,25 @@ class Village:
         m["skills"][job["res"]] += 0.5
 
     # ---------- 입력 ----------
-    def move(self, pid, x, y, now):
+    def set_pos(self, pid, x, y, now):
+        """클라이언트가 직접 움직이고 위치를 알려준다. 속도와 벽만 검사해서 이상하면 되돌린다."""
         m = self.member(pid)
-        p = self.path((m["x"], m["y"]), (int(x), int(y)))
-        if p is None:
+        if not (math.isfinite(x) and math.isfinite(y)):
             return
-        self.stop_job(pid, now)
-        self.pending.pop(pid, None)
-        self.target.pop(pid, None)
-        self.paths[pid] = p
+        lx, ly, lt = self.last_pos.get(pid, (m["x"], m["y"], now - 1))
+        allowed = PLAYER_SPEED * max(0.05, now - lt) * 1.5 + 0.6
+        if math.hypot(x - lx, y - ly) > allowed or not self.free(x, y):
+            self.corrections.append((pid, m["x"], m["y"]))
+            return
+        m["x"], m["y"] = x, y
+        self.last_pos[pid] = (x, y, now)
+        self.moved = True
+        job = m["job"]
+        if job and (int(x), int(y)) != (job["sx"], job["sy"]):
+            self.stop_job(pid, now)
 
-    def set_dir(self, pid, dx, dy, now):
-        """키보드 이동: 방향을 누르고 있는 동안 틱마다 한 칸씩."""
-        dx, dy = max(-1, min(1, int(dx))), max(-1, min(1, int(dy)))
-        if not dx and not dy:
-            self.dirs.pop(pid, None)
-            return
-        self.stop_job(pid, now)
-        self.pending.pop(pid, None)
-        self.target.pop(pid, None)
-        self.paths.pop(pid, None)
-        self.dirs[pid] = (dx, dy)
-
-    def step_dir(self, pid):
-        m = self.member(pid)
-        dx, dy = self.dirs[pid]
-        x, y = m["x"], m["y"]
-        tries = [(dx, dy)]
-        if dx and dy:  # 대각선이 막히면 벽을 따라 미끄러지기
-            tries += [(dx, 0), (0, dy)]
-        for ddx, ddy in tries:
-            nx, ny = x + ddx, y + ddy
-            if not self.walkable(nx, ny):
-                continue
-            if ddx and ddy and not (self.walkable(x + ddx, y) and self.walkable(x, y + ddy)):
-                continue
-            m["x"], m["y"] = nx, ny
-            self.moved = True
-            return
+    def near_tile(self, m, x, y, reach=1):
+        return max(abs(int(m["x"]) - x), abs(int(m["y"]) - y)) <= reach
 
     def gather(self, pid, x, y, now):
         res = TILE_RES.get(self.tile(x, y))
@@ -312,23 +292,11 @@ class Village:
         if self.d["buildings"][JOBS[res]["building"]] <= 0:
             raise VillageError(f"{BUILDINGS[JOBS[res]['building']]['name']}을(를) 먼저 지어야 합니다.")
         m = self.member(pid)
-        p = self.stand_path((m["x"], m["y"]), x, y)
-        if p is None:
-            raise VillageError("갈 수 없는 곳입니다. 가장자리부터 채집해보세요.")
+        if not self.near_tile(m, x, y):
+            raise VillageError("자원 바로 옆에서 시작할 수 있어요.")
         self.stop_job(pid, now)
         self.target.pop(pid, None)
-        self.paths[pid] = p
-        self.pending[pid] = {"res": res, "x": x, "y": y}
-        if not p:
-            self.arrive(pid, now)
-
-    def arrive(self, pid, now):
-        job = self.pending.pop(pid, None)
-        if job:
-            try:
-                self.start_job(pid, job["res"], job["x"], job["y"], now)
-            except VillageError as e:
-                self.tell(pid, str(e))
+        self.start_job(pid, res, x, y, now)
 
     def build(self, pid, bid, now):
         d = self.d
@@ -359,8 +327,7 @@ class Village:
         if not c:
             return 0
         bx, by = BUILDING_POS[c["id"]]
-        return sum(1 for pid in self.online
-                   if max(abs(self.member(pid)["x"] - bx), abs(self.member(pid)["y"] - by)) <= 3)
+        return sum(1 for pid in self.online if self.near_tile(self.member(pid), bx, by, 3))
 
     def finish_building(self, now):
         c = self.d["construction"]
@@ -409,9 +376,7 @@ class Village:
         if not mon:
             return
         self.stop_job(pid, now)
-        self.pending.pop(pid, None)
         self.target[pid] = mid
-        self.paths.pop(pid, None)
 
     def hit_monster(self, pid, mon, now):
         m = self.member(pid)
@@ -451,12 +416,8 @@ class Village:
             raise VillageError("던전 입구를 지어야 보스에 도전할 수 있습니다.")
         m = self.member(pid)
         bx, by = BUILDING_POS["dungeon"]
-        if max(abs(m["x"] - bx), abs(m["y"] - by)) > 2:
-            self.stop_job(pid, now)
-            p = self.path((m["x"], m["y"]), (bx, by + 1))
-            if p is not None:
-                self.paths[pid] = p
-            raise VillageError("던전 입구로 이동합니다. 도착하면 다시 공격하세요.")
+        if not self.near_tile(m, bx, by, 2):
+            raise VillageError("던전 입구 가까이 가야 공격할 수 있어요.")
         if self.cd.get((pid, "boss"), 0) > now:
             return
         energy = self.energy(m, now)
@@ -565,36 +526,21 @@ class Village:
         d["last"] = now
 
     def move_tick(self, now):
-        """0.2초마다: 접속자 이동, 습격 몬스터 이동, 근접 공격."""
+        """0.2초마다: 붙어 있는 습격 몬스터 공격, 몬스터 이동. (플레이어 이동은 클라이언트가 한다)"""
         raid = self.d["raid"]
         for pid in list(self.online):
-            m = self.member(pid)
             tgt = self.target.get(pid)
-            if tgt:
-                mon = raid and next((x for x in raid["monsters"] if x["id"] == tgt), None)
-                if not mon:
-                    self.target.pop(pid, None)
-                elif max(abs(m["x"] - mon["x"]), abs(m["y"] - mon["y"])) <= 1:
-                    self.paths.pop(pid, None)
-                    if self.cd.get((pid, "atk"), 0) <= now:
-                        self.cd[(pid, "atk")] = now + ATTACK_COOLDOWN
-                        if pid not in raid["fighters"]:
-                            raid["fighters"].append(pid)
-                        self.hit_monster(pid, mon, now)
-                elif not self.paths.get(pid) or self.cd.get((pid, "repath"), 0) <= now:
-                    self.cd[(pid, "repath")] = now + 0.6
-                    p = self.path((m["x"], m["y"]), (mon["x"], mon["y"]))
-                    self.paths[pid] = p[:-1] if p else []
-            if pid in self.dirs and not self.paths.get(pid):
-                self.step_dir(pid)
+            if not tgt or not raid:
                 continue
-            p = self.paths.get(pid)
-            if p:
-                m["x"], m["y"] = p.pop(0)
-                self.moved = True
-                if not p:
-                    self.paths.pop(pid, None)
-                    self.arrive(pid, now)
+            mon = next((x for x in raid["monsters"] if x["id"] == tgt), None)
+            if not mon:
+                self.target.pop(pid, None)
+            elif self.near_tile(self.member(pid), mon["x"], mon["y"]) and self.cd.get((pid, "atk"), 0) <= now:
+                self.cd[(pid, "atk")] = now + ATTACK_COOLDOWN
+                if pid not in raid["fighters"]:
+                    raid["fighters"].append(pid)
+                self.hit_monster(pid, mon, now)
+                raid = self.d["raid"]
         if raid and self.online:
             wx, wy = BUILDING_POS["warehouse"]
             for mon in raid["monsters"]:
@@ -612,7 +558,7 @@ class Village:
         for pid, m in d["members"].items():
             job = m["job"]
             members[pid] = {
-                "name": m["name"], "color": m["color"], "x": m["x"], "y": m["y"], "online": pid in self.online,
+                "name": m["name"], "color": m["color"], "x": round(m["x"], 2), "y": round(m["y"], 2), "online": pid in self.online,
                 "contrib": m["contrib"], "coins": int(m["coins"]), "tools": m["tools"],
                 "skills": {k: skill_level(v) for k, v in m["skills"].items()},
                 "xp": {k: round(v) for k, v in m["skills"].items()},
@@ -639,6 +585,6 @@ class Village:
 
     def positions(self):
         raid = self.d["raid"]
-        return {"p": [[pid, self.member(pid)["x"], self.member(pid)["y"]] for pid in self.online],
+        return {"p": [[pid, round(self.member(pid)["x"], 2), round(self.member(pid)["y"], 2)] for pid in self.online],
                 "m": [[x["id"], x["x"], x["y"], x["hp"]] for x in raid["monsters"]] if raid else [],
                 "ev": self.ev}

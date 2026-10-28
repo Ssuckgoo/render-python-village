@@ -22,6 +22,7 @@ JOBS = {
 }
 OFFLINE_CAP = 2 * 3600          # 걸어둔 일이 계속되는 시간 (여관 레벨당 +1시간)
 TOGETHER_BONUS = 0.3            # 같이 일하는 사람 1명당 +30% (최대 +100%)
+PLAYER_SPEED = 6.5              # 초당 타일
 ACTIVE_COOLDOWN = 1.5           # 열심히 일하기 재사용
 ACTIVE_AMOUNT = 0.25           # x (1 + 분당 생산량)
 COIN_PER_UNIT = 0.1

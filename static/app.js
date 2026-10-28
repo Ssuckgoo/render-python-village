@@ -20,6 +20,13 @@ const rpos = {};
 const fx = [], parts = [], beams = [];
 const flashAt = {};
 let lastFrame = performance.now();
+// 내 캐릭터는 브라우저가 직접 움직인다 (서버는 검증만). 좌표는 칸 중심 기준 실수.
+const SPEED = 6.5, RADIUS = 0.3;
+let L = null;                  // 내 위치
+let auto = null;               // 자동 걷기 {wps: [[x, y]...], done}
+let chase = null;              // 쫓아가는 습격 몬스터 {id, repath}
+let meMoving = false;
+let lastSent = { x: 0, y: 0, t: 0 };
 
 // ---------------- 공통 ----------------
 function toast(msg) {
@@ -127,6 +134,7 @@ function connect() {
 function onMessage(m) {
   if (m.t === 'welcome') {
     me = m.you;
+    L = null;
     lsSet('tok_' + code, m.token);
     $('#chat-log').innerHTML = '';
     m.chat.forEach(addChat);
@@ -135,6 +143,7 @@ function onMessage(m) {
     applyState(m.s);
     playEvents(m.ev || []);
   } else if (m.t === 'tk') applyTick(m);
+  else if (m.t === 'you') { L = { x: m.x, y: m.y }; auto = null; chase = null; lastSent = { x: m.x, y: m.y, t: performance.now() }; }
   else if (m.t === 'chat') { addChat(m.line); if (tab !== 'chat') { unreadChat++; renderTabs(); } }
   else if (m.t === 'error') toast(m.msg);
   else if (m.t === 'fatal') {
@@ -168,8 +177,12 @@ function applyState(s) {
   if (first) {
     showScreen('game');
     remember(s.code, s.name);
-    const m = myMember();
-    if (m) { cam.x = m.x * TS - W / 2; cam.y = m.y * TS - H / 2; }
+  }
+  const mine = myMember();
+  if (mine && !L) {
+    L = { x: mine.x, y: mine.y };
+    lastSent = { x: L.x, y: L.y, t: performance.now() };
+    cam.x = L.x * TS - W / 2; cam.y = L.y * TS - H / 2;
   }
   renderTop();
   renderSide();
@@ -191,7 +204,7 @@ function entityPos(id) {
   if (id === 'boss') { const [x, y] = META.building_pos.dungeon; return { x, y: y - 0.5 }; }
   if (rpos[id]) return rpos[id];
   const mem = S.members[id];
-  if (mem) return { x: mem.x, y: mem.y };
+  if (mem) return { x: mem.x - 0.5, y: mem.y - 0.5 };
   const mo = S.raid && S.raid.monsters.find((q) => q.id === id);
   return mo ? { x: mo.x, y: mo.y } : null;
 }
@@ -547,7 +560,7 @@ function monsterAt(wx, wy) {
   return S.raid.monsters.find((m) => { const p = rpos[m.id] || m; return Math.abs(p.x + 0.5 - wx) < 0.7 && Math.abs(p.y + 0.4 - wy) < 0.7; });
 }
 function memberAt(wx, wy) {
-  return Object.entries(S.members).find(([id, m]) => { const p = rpos[id] || m; return Math.abs(p.x + 0.5 - wx) < 0.5 && Math.abs(p.y + 0.3 - wy) < 0.6; });
+  return Object.entries(S.members).find(([id]) => { const p = entityPos(id); return Math.abs(p.x + 0.5 - wx) < 0.5 && Math.abs(p.y + 0.3 - wy) < 0.6; });
 }
 function buildingAt(wx, wy) {
   return Object.entries(META.building_pos).find(([bid, [bx, by]]) =>
@@ -573,8 +586,12 @@ cv.addEventListener('click', (e) => {
   const p = canvasPoint(e);
   const tx = Math.floor(p.wx), ty = Math.floor(p.wy);
   const mon = monsterAt(p.wx, p.wy);
-  if (mon) return send({ t: 'attack', id: mon.id });
-  if (bossAt(p.wx, p.wy)) return send({ t: 'boss' });
+  if (mon) { chase = { id: mon.id, repath: 0 }; auto = null; return send({ t: 'attack', id: mon.id }); }
+  if (bossAt(p.wx, p.wy)) {
+    const [bx, by] = META.building_pos.dungeon;
+    if (nearTile(bx, by, 2)) return send({ t: 'boss' });
+    return walkTo([[bx, by + 1]], () => send({ t: 'boss' }));
+  }
   const b = buildingAt(p.wx, p.wy);
   if (b) {
     selected = b[0];
@@ -583,8 +600,18 @@ cv.addEventListener('click', (e) => {
     return;
   }
   const t = tileAt(tx, ty);
-  if (RES_TILES[t]) send({ t: 'gather', x: tx, y: ty });
+  if (RES_TILES[t]) gatherAt(tx, ty);
 });
+
+function nearTile(x, y, reach = 1) {
+  return L && Math.max(Math.abs(Math.floor(L.x) - x), Math.abs(Math.floor(L.y) - y)) <= reach;
+}
+function gatherAt(tx, ty) {
+  if (nearTile(tx, ty)) return send({ t: 'gather', x: tx, y: ty });
+  const stands = [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, 1], [1, -1], [-1, -1]]
+    .map(([dx, dy]) => [tx + dx, ty + dy]).filter(([x, y]) => walkable(x, y));
+  walkTo(stands, () => send({ t: 'gather', x: tx, y: ty }));
+}
 
 function showCanvasTip(e) {
   const tip = $('#tip');
@@ -616,34 +643,115 @@ function showCanvasTip(e) {
   tip.style.top = Math.min(window.innerHeight - tip.offsetHeight - 8, e.clientY + 14) + 'px';
 }
 
-// 키보드 이동: 누르고 있는 방향을 서버에 알려주면 서버가 틱마다 한 칸씩 움직인다
+// ---------------- 내 캐릭터 이동 ----------------
 const MOVE_KEYS = {
   KeyW: [0, -1], ArrowUp: [0, -1], KeyS: [0, 1], ArrowDown: [0, 1],
   KeyA: [-1, 0], ArrowLeft: [-1, 0], KeyD: [1, 0], ArrowRight: [1, 0],
 };
 const held = new Set();
-let lastDir = '0,0', facing = [0, 1];
-function sendDir() {
+let facing = [0, 1];
+const walkable = (x, y) => '.,F:='.includes(tileAt(x, y));
+function free(x, y) {
+  const r = RADIUS, f = Math.floor;
+  return walkable(f(x - r), f(y - r)) && walkable(f(x + r), f(y - r)) && walkable(f(x - r), f(y + r)) && walkable(f(x + r), f(y + r));
+}
+function moveBy(dx, dy) {  // 축별로 나눠 움직여 벽을 따라 미끄러지게
+  let moved = false;
+  if (dx && free(L.x + dx, L.y)) { L.x += dx; moved = true; }
+  if (dy && free(L.x, L.y + dy)) { L.y += dy; moved = true; }
+  return moved;
+}
+function lineFree(x0, y0, x1, y1) {
+  const n = Math.ceil(Math.hypot(x1 - x0, y1 - y0) / 0.25);
+  for (let i = 1; i <= n; i++) if (!free(x0 + (x1 - x0) * i / n, y0 + (y1 - y0) * i / n)) return false;
+  return true;
+}
+function findPath(sx, sy, goals) {
+  const W_ = mapRows[0].length, key = (x, y) => y * W_ + x;
+  const goalSet = new Set(goals.map(([x, y]) => key(x, y)));
+  const prev = new Map([[key(sx, sy), -1]]);
+  const q = [[sx, sy]];
+  const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+  for (let h = 0; h < q.length && q.length < 5000; h++) {
+    const [x, y] = q[h];
+    if (goalSet.has(key(x, y))) {
+      const out = [];
+      for (let k = key(x, y); k !== key(sx, sy); k = prev.get(k)) out.push([k % W_, Math.floor(k / W_)]);
+      return out.reverse();
+    }
+    for (const [dx, dy] of dirs) {
+      const nx = x + dx, ny = y + dy;
+      if (!walkable(nx, ny) || prev.has(key(nx, ny))) continue;
+      if (dx && dy && !(walkable(x + dx, y) && walkable(x, y + dy))) continue;
+      prev.set(key(nx, ny), key(x, y));
+      q.push([nx, ny]);
+    }
+  }
+  return null;
+}
+// goals 중 가장 가까운 칸까지 걸어간 뒤 done 실행
+function walkTo(goals, done) {
+  if (!L) return false;
+  const path = findPath(Math.floor(L.x), Math.floor(L.y), goals);
+  if (!path) { toast('갈 수 없는 곳이에요.'); return false; }
+  auto = { wps: path.map(([x, y]) => [x + 0.5, y + 0.5]), done, stuck: 0 };
+  return true;
+}
+
+function updateMe(dt, t) {
+  if (!L || !S || S.members[me] === undefined) return;
+  const step = SPEED * dt / 1000;
   let dx = 0, dy = 0;
   for (const k of held) { dx += MOVE_KEYS[k][0]; dy += MOVE_KEYS[k][1]; }
-  dx = Math.sign(dx); dy = Math.sign(dy);
-  const key = `${dx},${dy}`;
-  if (key === lastDir) return;
-  lastDir = key;
-  if (dx || dy) facing = [dx, dy];
-  send({ t: 'dir', dx, dy });
+  meMoving = false;
+  if (dx || dy) {
+    auto = null; chase = null;
+    const n = Math.hypot(dx, dy);
+    meMoving = moveBy(dx / n * step, dy / n * step);
+    facing = [Math.sign(dx), Math.sign(dy)];
+  } else if (auto) {
+    let budget = step;
+    const ox = L.x, oy = L.y;
+    while (budget > 1e-6 && auto.wps.length) {
+      while (auto.wps.length > 1 && lineFree(L.x, L.y, auto.wps[1][0], auto.wps[1][1])) auto.wps.shift();
+      const [wx, wy] = auto.wps[0];
+      const d = Math.hypot(wx - L.x, wy - L.y);
+      if (d <= budget) { moveBy(wx - L.x, wy - L.y); auto.wps.shift(); budget -= d; }
+      else { moveBy((wx - L.x) / d * budget, (wy - L.y) / d * budget); budget = 0; }
+    }
+    meMoving = Math.hypot(L.x - ox, L.y - oy) > 1e-4;
+    if (!meMoving && auto.wps.length && ++auto.stuck > 15) auto = null;  // 벽에 걸림
+    else if (auto && !auto.wps.length) { const done = auto.done; auto = null; if (done) done(); }
+  }
+  if (chase) {
+    const mon = S.raid && S.raid.monsters.find((q) => q.id === chase.id);
+    if (!mon) chase = null;
+    else if (nearTile(mon.x, mon.y)) auto = null;
+    else if (!auto || t > chase.repath) {
+      chase.repath = t + 400;
+      const path = findPath(Math.floor(L.x), Math.floor(L.y), [[mon.x, mon.y]]);
+      auto = path ? { wps: path.slice(0, -1).map(([x, y]) => [x + 0.5, y + 0.5]), stuck: 0 } : null;
+    }
+  }
+  // 서버에 위치 보고 (최대 초당 10회)
+  if ((Math.abs(L.x - lastSent.x) > 0.01 || Math.abs(L.y - lastSent.y) > 0.01) && t - lastSent.t > 100) {
+    lastSent = { x: L.x, y: L.y, t };
+    send({ t: 'pos', x: Math.round(L.x * 100) / 100, y: Math.round(L.y * 100) / 100 });
+  }
 }
-function releaseAll() { held.clear(); sendDir(); }
+
+function releaseAll() { held.clear(); }
 window.addEventListener('blur', releaseAll);
 
 // Space: 일하는 중이면 열심히 일하기, 아니면 바라보는 쪽(없으면 주변) 자원으로 일 시작
 function spaceAction() {
   const m = myMember();
-  if (!m) return;
+  if (!m || !L) return;
   if (m.job) return send({ t: 'work' });
   const order = [facing, [0, 0], [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, 1], [1, -1], [-1, -1]];
+  const fx_ = Math.floor(L.x), fy = Math.floor(L.y);
   for (const [dx, dy] of order) {
-    const x = m.x + dx, y = m.y + dy;
+    const x = fx_ + dx, y = fy + dy;
     if (RES_TILES[tileAt(x, y)]) return send({ t: 'gather', x, y });
   }
   toast('주변에 채집할 자원이 없어요. 나무·바위·물·밭 옆으로 가세요.');
@@ -655,16 +763,13 @@ document.addEventListener('keydown', (e) => {
   if (MOVE_KEYS[e.code]) {
     e.preventDefault();
     held.add(e.code);
-    sendDir();
   } else if (e.code === 'Space') {
     e.preventDefault();
     if (!e.repeat) spaceAction();
     else if (myMember() && myMember().job) send({ t: 'work' });
   } else if (e.code === 'Enter') { e.preventDefault(); releaseAll(); setTab('chat'); }
 });
-document.addEventListener('keyup', (e) => {
-  if (MOVE_KEYS[e.code] && held.delete(e.code)) sendDir();
-});
+document.addEventListener('keyup', (e) => { if (MOVE_KEYS[e.code]) held.delete(e.code); });
 
 const realTitle = document.title;
 function toggleBoss() {
@@ -684,22 +789,23 @@ function loop(t) {
 
 function lerp(id, x, y, dt) {
   const r = rpos[id];
-  if (!r || Math.abs(r.x - x) + Math.abs(r.y - y) > 4) return (rpos[id] = { x, y });
-  const sp = dt / 200;
-  r.x += Math.sign(x - r.x) * Math.min(Math.abs(x - r.x), sp);
-  r.y += Math.sign(y - r.y) * Math.min(Math.abs(y - r.y), sp);
+  if (!r || Math.abs(r.x - x) + Math.abs(r.y - y) > 4) return (rpos[id] = { x, y, moving: false });
+  const k = Math.min(1, dt / 110);
+  r.moving = Math.hypot(x - r.x, y - r.y) > 0.04;
+  r.x += (x - r.x) * k;
+  r.y += (y - r.y) * k;
   return r;
 }
 
 function draw(t, dt) {
   ctx.imageSmoothingEnabled = false;
-  const mm = myMember();
-  if (mm) {
-    const r = lerp(me, mm.x, mm.y, dt);
-    const gx = Math.max(0, Math.min(mapCache.width - W, r.x * TS + TS / 2 - W / 2));
-    const gy = Math.max(0, Math.min(mapCache.height - H, r.y * TS + TS / 2 - H / 2));
-    cam.x += (gx - cam.x) * 0.15;
-    cam.y += (gy - cam.y) * 0.15;
+  updateMe(dt, t);
+  if (L) {
+    rpos[me] = { x: L.x - 0.5, y: L.y - 0.5, moving: meMoving };
+    const gx = Math.max(0, Math.min(mapCache.width - W, L.x * TS - W / 2));
+    const gy = Math.max(0, Math.min(mapCache.height - H, L.y * TS - H / 2));
+    cam.x += (gx - cam.x) * Math.min(1, dt / 80);
+    cam.y += (gy - cam.y) * Math.min(1, dt / 80);
   }
   const cx = Math.round(cam.x), cy = Math.round(cam.y);
   const sx = (x) => x * TS - cx, sy = (y) => y * TS - cy;
@@ -718,7 +824,7 @@ function draw(t, dt) {
   const ents = [];
   for (const bid of Object.keys(META.building_pos)) ents.push({ y: META.building_pos[bid][1] + 0.9, f: () => drawBuilding(bid, t) });
   for (const [pid, m] of Object.entries(S.members)) {
-    const r = lerp(pid, m.x, m.y, dt);
+    const r = pid === me && L ? rpos[me] : lerp(pid, m.x - 0.5, m.y - 0.5, dt);
     ents.push({ y: r.y, f: () => drawVillager(pid, m, r, sx, sy, t) });
   }
   if (S.raid) for (const mo of S.raid.monsters) {
@@ -756,7 +862,7 @@ function drawVillager(pid, m, r, sx, sy, t) {
   const off = (parseInt(pid.slice(0, 2), 16) % 5) - 2;
   const px = sx(r.x) + off * 4, py = sy(r.y) + (off % 2) * 3;
   if (px < -40 || px > W + 40 || py < -40 || py > H + 40) return;
-  const moving = Math.abs(r.x - m.x) + Math.abs(r.y - m.y) > 0.05;
+  const moving = r.moving;
   const working = m.job && !moving;
   let bob = moving ? -Math.abs(Math.sin(t / 70)) * 3 : 0;
   if (working && m.online) bob = -Math.abs(Math.sin(t / 180)) * 2;
@@ -851,7 +957,7 @@ function drawNight(sx, sy) {
   ctx.globalCompositeOperation = 'lighter';
   const lights = Object.entries(META.building_pos).filter(([bid]) => S.buildings[bid] > 0 && bid !== 'bridge')
     .map(([, [x, y]]) => [x, y]);
-  for (const m of Object.values(S.members)) if (m.online) lights.push([m.x, m.y]);
+  for (const m of Object.values(S.members)) if (m.online) lights.push([m.x - 0.5, m.y - 0.5]);
   for (const [x, y] of lights) {
     const px = sx(x) + 16, py = sy(y) + 8;
     const g = ctx.createRadialGradient(px, py, 4, px, py, 70);
