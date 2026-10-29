@@ -1,27 +1,70 @@
 // Kenney(CC0) 16x16 타일 시트를 불러와서 그리는 도우미. 시트 번호 = 행 * 열수 + 열.
 const SHEETS = {
-  town: { src: '/static/assets/town.png', cols: 12 },
-  dungeon: { src: '/static/assets/dungeon.png', cols: 12 },
-  farm: { src: '/static/assets/farm.png', cols: 12 },
+  town: { src: '/static/assets/town.png', cols: 12, thin: true },
+  dungeon: { src: '/static/assets/dungeon.png', cols: 12, thin: true },
+  farm: { src: '/static/assets/farm.png', cols: 12, thin: true },
   battle: { src: '/static/assets/battle.png', cols: 18 },
 };
 const SHEET_IMG = {};
+const SHEET_SCALE = {};
 
 function loadSheets() {
   return Promise.all(Object.entries(SHEETS).map(([k, s]) => new Promise((res, rej) => {
     const im = new Image();
-    im.onload = () => { SHEET_IMG[k] = im; res(); };
+    im.onload = () => {
+      if (s.thin) { SHEET_IMG[k] = thinOutline(im); SHEET_SCALE[k] = 2; }
+      else { SHEET_IMG[k] = im; SHEET_SCALE[k] = 1; }
+      res();
+    };
     im.onerror = () => rej(new Error('타일 이미지를 불러오지 못했습니다: ' + s.src));
     im.src = s.src;
   })));
 }
 
+// Kenney 외곽선(#3f2631)이 32px로 키우면 너무 굵어서:
+// 2배로 키운 뒤 투명한 바깥과 맞닿은 외곽선 픽셀은 지워 두께를 절반으로 만들고,
+// 남은 외곽선은 옆 색을 어둡게 한 색으로 바꿔 부드럽게 한다.
+function thinOutline(img) {
+  const S = 2, T = 16 * S, w = img.width * S, h = img.height * S;
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const g = c.getContext('2d');
+  g.imageSmoothingEnabled = false;
+  g.drawImage(img, 0, 0, w, h);
+  const data = g.getImageData(0, 0, w, h);
+  const a = data.data, src = new Uint8ClampedArray(a);
+  const idx = (x, y) => (y * w + x) * 4;
+  const isLine = (i) => src[i + 3] > 0 && src[i] === 0x3f && src[i + 1] === 0x26 && src[i + 2] === 0x31;
+  const sameTile = (x, y, nx, ny) => Math.floor(x / T) === Math.floor(nx / T) && Math.floor(y / T) === Math.floor(ny / T);
+  const N4 = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = idx(x, y);
+      if (!isLine(i)) continue;
+      let outer = false, fill = null;
+      for (const [dx, dy] of N4) {
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h || !sameTile(x, y, nx, ny)) continue;
+        const j = idx(nx, ny);
+        if (src[j + 3] === 0) outer = true;
+        else if (!isLine(j) && !fill) fill = j;
+      }
+      if (outer) { a[i + 3] = 0; continue; }
+      if (fill !== null) {   // 옆 색을 어둡게
+        a[i] = src[fill] * 0.45; a[i + 1] = src[fill + 1] * 0.45; a[i + 2] = src[fill + 2] * 0.45;
+      } else { a[i] = 0x4d; a[i + 1] = 0x37; a[i + 2] = 0x42; }
+    }
+  }
+  g.putImageData(data, 0, 0);
+  return c;
+}
+
 // [시트, 번호]를 (x, y)에 size 크기로
 function drawTile(c, t, x, y, size = 32) {
   if (!t) return;
-  const [sheet, idx] = t;
-  const cols = SHEETS[sheet].cols;
-  c.drawImage(SHEET_IMG[sheet], (idx % cols) * 16, Math.floor(idx / cols) * 16, 16, 16, x, y, size, size);
+  const [sheet, i] = t;
+  const cols = SHEETS[sheet].cols, s = 16 * SHEET_SCALE[sheet];
+  c.drawImage(SHEET_IMG[sheet], (i % cols) * s, Math.floor(i / cols) * s, s, s, x, y, size, size);
 }
 
 const tileUrlCache = {};
@@ -29,8 +72,10 @@ function tileURL(t) {
   const key = t.join(':');
   if (!tileUrlCache[key]) {
     const c = document.createElement('canvas');
-    c.width = c.height = 16;
-    drawTile(c.getContext('2d'), t, 0, 0, 16);
+    c.width = c.height = 32;
+    const g = c.getContext('2d');
+    g.imageSmoothingEnabled = false;
+    drawTile(g, t, 0, 0, 32);
     tileUrlCache[key] = c.toDataURL();
   }
   return tileUrlCache[key];
@@ -44,7 +89,10 @@ const TILES = {
   stoneFloor: [tw(109)],
   trees: [tw(16), tw(16), tw(16), tw(28), tw(15)],   // 아랫부분
   treeTop: { 16: tw(4), 15: tw(3) },                 // 큰 나무는 윗칸이 따로
+  sapling: tw(17),
   rocks: [fm(89), fm(89), fm(77)],
+  rubble: fm(77),
+  sprout: fm(16),
   // 물: 땅이 어느 쪽에 붙어 있는지에 따라
   water: {
     c: bt(37), t: bt(19), b: bt(55), l: bt(36), r: bt(38),
@@ -58,11 +106,20 @@ const TILES = {
 
 // 사람 캐릭터 (주민마다 하나씩)
 const HEROES = [dg(85), dg(88), dg(99), dg(98), dg(86), dg(112), dg(100), dg(87), dg(84), dg(96), dg(97)];
-const MONSTER_TILE = { wolf: dg(124), goblin: dg(110), bandit: dg(111), troll: dg(109) };
+const MONSTER_TILE = {
+  wolf: dg(124), goblin: dg(110), bandit: dg(111), troll: dg(109),
+  bat: dg(120), spider: dg(122), rat: dg(123), slime: dg(108), ghost: dg(121),
+};
 const ANIMALS = [fm(122), fm(122), fm(122), fm(120), fm(120), fm(121)];
+// 일할 때 손에 드는 도구 (낚시는 낚싯줄을 직접 그림)
+const WORK_TOOL = { wood: fm(87), stone: tw(115), ore: tw(115), food: fm(88) };
+const GEAR_TILE = {
+  club: dg(117), stone_axe: dg(118), iron_sword: dg(104), crystal_sword: dg(106),
+  leather_armor: dg(101), iron_armor: dg(102), crystal_armor: dg(102),
+};
 
 // 자원 아이콘 (Kenney에 없는 건 직접 그린 도트 사용)
-const RES_ICON = { wood: tw(106), stone: fm(77), food: fm(54), ore: fm(89), gold: tw(93) };
+const RES_ICON = { wood: tw(106), stone: fm(77), food: fm(54), ore: fm(89), gold: tw(93), leather: dg(66) };
 
 // 건물: rows는 위에서 아래로, 맨 아랫줄이 건물 좌표 줄. extra는 주변 소품 (dx, dy는 칸 단위, 건물 중심 기준)
 const BUILD_ART = {

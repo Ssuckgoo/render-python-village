@@ -19,6 +19,11 @@ let unreadChat = 0;
 const rpos = {};
 const fx = [], parts = [], beams = [];
 const flashAt = {};
+const shakeAt = {};            // 자원 칸 "x,y" -> 맞은 시각 (흔들림)
+const attackAt = {};           // 주민 id -> 공격한 시각 (무기 휘두르기)
+const workAnim = {};           // 주민 id -> 지난 프레임의 작업 동작 위치
+let hurtAt = 0;                // 내가 맞은 시각 (화면 붉게)
+let objRows = [];              // 줄마다 나무·바위 같은 오브젝트 목록
 let lastFrame = performance.now();
 // 내 캐릭터는 브라우저가 직접 움직인다 (서버는 검증만). 좌표는 칸 중심 기준 실수.
 const SPEED = 6.5, RADIUS = 0.3;
@@ -72,6 +77,9 @@ function ago(t) {
   return `${Math.floor(d / 86400)}일 전`;
 }
 function myMember() { return S && S.members[me]; }
+function allMonsters() { return S ? [...((S.raid && S.raid.monsters) || []), ...(S.wild || [])] : []; }
+const depKey = (x, y) => `${x},${y}`;
+function depleted(x, y) { return S && S.dep && S.dep[depKey(x, y)]; }
 
 // ---------------- 접속 ----------------
 async function init() {
@@ -202,7 +210,14 @@ function applyState(s) {
 
 function applyTick(m) {
   if (!S) return;
-  for (const [pid, x, y] of m.p) if (S.members[pid]) { S.members[pid].x = x; S.members[pid].y = y; }
+  for (const [pid, x, y, hp] of m.p) {
+    const mem = S.members[pid];
+    if (mem) { mem.x = x; mem.y = y; if (hp !== undefined) mem.hp = hp; }
+  }
+  if (m.w && S.wild) {
+    const rows = new Map(m.w.map((r) => [r[0], r]));
+    for (const mo of S.wild) { const r = rows.get(mo.id); if (r) { mo.x = r[1]; mo.y = r[2]; mo.hp = r[3]; } }
+  }
   if (S.raid) {
     for (const [id, x, y, hp] of m.m) {
       const mo = S.raid.monsters.find((q) => q.id === id);
@@ -217,7 +232,7 @@ function entityPos(id) {
   if (rpos[id]) return rpos[id];
   const mem = S.members[id];
   if (mem) return { x: mem.x - 0.5, y: mem.y - 0.5 };
-  const mo = S.raid && S.raid.monsters.find((q) => q.id === id);
+  const mo = allMonsters().find((q) => q.id === id);
   return mo ? { x: mo.x, y: mo.y } : null;
 }
 
@@ -230,11 +245,25 @@ function playEvents(evs) {
     } else if (e.k === 'hit') {
       const p = entityPos(e.tgt);
       flashAt[e.tgt] = t;
-      if (p) floatText(p.x + (Math.random() - 0.5) * 0.6, p.y - 0.6, `${e.v}`, '#ffffff', 14);
+      if (S.members[e.src]) attackAt[e.src] = t;
+      const onPlayer = !!S.members[e.tgt];
+      if (e.tgt === me) hurtAt = t;
+      if (p) floatText(p.x + (Math.random() - 0.5) * 0.6, p.y - 0.6, `${onPlayer ? '-' : ''}${e.v}`, onPlayer ? '#ff6b5e' : '#ffffff', 14);
     } else if (e.k === 'die') {
       const p = entityPos(e.tgt);
-      if (p) burst(p.x, p.y, '#ffffff', 14);
+      if (p) {
+        burst(p.x, p.y, '#ffffff', 14);
+        (e.drops || []).forEach((d, i) => floatText(p.x, p.y - 0.9 - i * 0.45, d, '#ffd27a', 12));
+      }
       if (S.raid) S.raid.monsters = S.raid.monsters.filter((q) => q.id !== e.tgt);
+      if (S.wild) S.wild = S.wild.filter((q) => q.id !== e.tgt);
+    } else if (e.k === 'fell') {
+      if (S.dep) S.dep[depKey(e.x, e.y)] = now() + (META.regrow[e.res] || 600);
+      burst(e.x, e.y - 0.3, e.res === 'wood' ? '#b07b45' : e.res === 'food' ? '#9bd35a' : '#c0cbdc', 18);
+    } else if (e.k === 'regrow') {
+      if (S.dep) delete S.dep[depKey(e.x, e.y)];
+    } else if (e.k === 'down') {
+      if (e.pid === me) toast('쓰러졌어요... 마을 분수 앞에서 정신을 차렸습니다.');
     } else if (e.k === 'tower') {
       const [tx, ty] = META.building_pos.tower;
       const p = entityPos(e.tgt);
@@ -389,23 +418,47 @@ function renderMe() {
   for (const [k, v] of Object.entries(m.skills)) {
     h += `<span>${k === 'combat' ? '전투' : VERB[k]} <b>Lv.${v}</b> <span class="muted">(${m.xp[k]}xp)</span></span>`;
   }
-  h += `</div><h4>도구 ${smithy ? `<span class="muted">(대장간 Lv.${smithy}까지)</span>` : '<span class="muted">— 대장간을 지으면 살 수 있어요</span>'}</h4>`;
+  h += `</div>${gearHTML(m, smithy)}<h4>도구 ${smithy ? `<span class="muted">(대장간 Lv.${smithy}까지)</span>` : '<span class="muted">— 대장간을 지으면 살 수 있어요</span>'}</h4>`;
   for (const [k, name] of Object.entries(META.tools)) {
     const lvl = m.tools[k];
     const price = META.tool_prices[lvl];
     const can = smithy && lvl < Math.min(META.tool_max, smithy) && m.coins >= price;
-    h += `<div class="tool">${k === 'weapon' ? tileImg(['dungeon', 103], 18) : resImg(k, 18)}<span class="nm">${name} <b>+${lvl}</b>
-      <span class="muted">${k === 'weapon' ? '공격력 +4/단계' : '채집 +15%/단계'}</span></span>
+    h += `<div class="tool">${resImg(k, 18)}<span class="nm">${name} <b>+${lvl}</b>
+      <span class="muted">채집 +15%/단계</span></span>
       ${lvl < META.tool_max ? `<button class="btn small" data-buy="${k}" ${can ? '' : 'disabled'}>${price}동전</button>` : '<span class="muted">최대</span>'}</div>`;
   }
-  h += `<p class="muted">동전은 채집(10개당 1), 습격 방어, 보스 공격으로 얻어요.</p>
-    <h4>마을 기록</h4><div class="muted">습격 방어 ${S.stats.raids_won} · 실패 ${S.stats.raids_lost} · 보스 처치 ${S.stats.bosses}</div>`;
+  h += `<p class="muted">동전은 채집(10개당 1), 몬스터 사냥, 습격 방어, 보스 공격으로 얻어요.</p>
+    <h4>마을 기록</h4><div class="muted">습격 방어 ${S.stats.raids_won} · 실패 ${S.stats.raids_lost} · 보스 처치 ${S.stats.bosses} · 사냥 ${S.stats.kills || 0}</div>`;
   $('#tab-me').innerHTML = h;
 }
 $('#tab-me').addEventListener('click', (e) => {
   const b = e.target.closest('[data-buy]');
-  if (b) send({ t: 'buy', kind: b.dataset.buy });
+  if (b) return send({ t: 'buy', kind: b.dataset.buy });
+  const c = e.target.closest('[data-craft]');
+  if (c) return send({ t: 'craft', id: c.dataset.craft });
+  const q = e.target.closest('[data-equip]');
+  if (q) send({ t: 'equip', id: q.dataset.equip });
 });
+
+// 전투 장비: 마을 창고 자원 + 내 동전으로 제작
+function gearHTML(m, smithy) {
+  const weapon = META.gear[m.eq.weapon], armor = META.gear[m.eq.armor];
+  let h = `<h4>전투 <span class="muted">체력 ${m.hp}/${m.max_hp} · 공격 ${6 + (weapon ? weapon.atk : 0) + m.skills.combat} · 방어 ${armor ? armor.df : 0}</span></h4>`;
+  for (const [gid, g] of Object.entries(META.gear)) {
+    const owned = m.gear.includes(gid), worn = m.eq[g.slot] === gid;
+    const stat = g.slot === 'weapon' ? `공격 +${g.atk}` : `방어 +${g.df}, 체력 +${g.hp}`;
+    const needSmithy = g.smithy && smithy < g.smithy;
+    const short = Object.entries(g.cost).some(([r, v]) => S.res[r] < v) || m.coins < g.coins;
+    let btn;
+    if (worn) btn = '<span class="muted">착용 중</span>';
+    else if (owned) btn = `<button class="btn small" data-equip="${gid}">장착</button>`;
+    else btn = `<button class="btn small" data-craft="${gid}" ${needSmithy || short ? 'disabled' : ''}>제작</button>`;
+    h += `<div class="tool">${tileImg(GEAR_TILE[gid], 20)}<span class="nm"><b>${g.name}</b> <span class="muted">${stat}</span>
+      ${owned ? '' : `<div class="cost">${costHTML(g.cost)}${g.coins ? `<span>${resImg('gold', 12)}${g.coins}동전</span>` : ''}
+      ${needSmithy ? `<span class="muted">대장간 Lv.${g.smithy} 필요</span>` : ''}</div>`}</span>${btn}</div>`;
+  }
+  return h + '<p class="muted">가죽은 늑대·쥐 같은 야생 몬스터에게서 얻어요. 마을 중심에서 멀어질수록 몬스터가 강해요.</p>';
+}
 setInterval(() => { if (S && (tab === 'news' || tab === 'people' || tab === 'build')) renderSide(); }, 5000);
 
 // ---------------- 지도 ----------------
@@ -443,7 +496,7 @@ function buildMapCache() {
     if (!isWater(x + 1, y + 1)) return W_.ibr;
     return W_.c;
   };
-  const tops = [];  // 큰 나무 윗부분은 나중에 (윗줄 위에) 그린다
+  objRows = Array.from({ length: h }, () => []);
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const t = mapRows[y][x], px = x * TS, py = y * TS;
@@ -461,22 +514,14 @@ function buildMapCache() {
         drawTile(c, TILES.grass[0], px, py);
         drawTile(c, !isField(x - 1, y) ? F_.l : !isField(x + 1, y) ? F_.r : F_.m[x % 2], px, py);
       } else drawTile(c, pick(TILES.grass, x, y), px, py);
-      // 위에 얹는 것
+      // 나무·바위·광석·작물은 캐시에 넣지 않고 매 프레임 따로 그린다 (흔들림, 사라짐, 앞뒤 가림)
       if (t === 'T' || t === '#') {
         const tr = t === '#' ? TILES.trees[3] : pick(TILES.trees, x, y);
-        drawTile(c, tr, px, py);
-        const top = TILES.treeTop[tr[1]];
-        if (top && y > 0) tops.push([top, px, py - TS]);
-      } else if (t === 'R') drawTile(c, pick(TILES.rocks, x, y), px, py);
-      else if (t === 'm') {
-        drawTile(c, TILES.rocks[0], px, py);
-        const r = hash(x, y);
-        c.fillStyle = r < 0.5 ? '#ff9f1c' : '#c9b8ff';
-        c.fillRect(px + 10 + ((r * 31) | 0) % 8, py + 14, 4, 4);
-        c.fillRect(px + 18, py + 20 - ((r * 17) | 0) % 6, 3, 3);
-      } else if (t === 'F' && hash(x * 3, y) > 0.35) {
-        drawTile(c, TILES.crops[y % TILES.crops.length], px, py);
-      } else if (t === 'b' || t === '=') {
+        objRows[y].push({ x, y, k: t, tile: tr, top: TILES.treeTop[tr[1]] });
+      } else if (t === 'R') objRows[y].push({ x, y, k: t, tile: pick(TILES.rocks, x, y) });
+      else if (t === 'm') objRows[y].push({ x, y, k: t, tile: TILES.rocks[0], spark: hash(x, y) });
+      else if (t === 'F') objRows[y].push({ x, y, k: t, tile: hash(x * 3, y) > 0.35 ? TILES.crops[y % TILES.crops.length] : null });
+      else if (t === 'b' || t === '=') {
         c.fillStyle = '#5a3a1a';
         c.fillRect(px + 4, py + 2, 4, 28); c.fillRect(px + 24, py + 2, 4, 28);
         if (t === '=') {
@@ -487,15 +532,15 @@ function buildMapCache() {
       }
     }
   }
-  for (const [tt, px, py] of tops) drawTile(c, tt, px, py);
   makeAnimals();
 }
 
 // 농장 근처를 돌아다니는 동물 (화면 연출)
 let animals = [];
+const FARM = { x1: 42, x2: 58, y1: 5, y2: 17 };
 function makeAnimals() {
   animals = ANIMALS.map((t, i) => {
-    const x = 23 + hash(i, 9) * 8, y = 3 + hash(i, 4) * 8;
+    const x = FARM.x1 + hash(i, 9) * (FARM.x2 - FARM.x1), y = FARM.y1 + hash(i, 4) * (FARM.y2 - FARM.y1);
     return { t, x, y, tx: x, ty: y, wait: 0, flip: false };
   });
 }
@@ -505,14 +550,64 @@ function updateAnimals(dt) {
     const dx = a.tx - a.x, dy = a.ty - a.y, d = Math.hypot(dx, dy);
     if (d < 0.05) {
       a.wait = 1000 + Math.random() * 4000;
-      a.tx = Math.min(31, Math.max(22, a.x + (Math.random() - 0.5) * 4));
-      a.ty = Math.min(11, Math.max(3, a.y + (Math.random() - 0.5) * 3));
+      a.tx = Math.min(FARM.x2, Math.max(FARM.x1, a.x + (Math.random() - 0.5) * 4));
+      a.ty = Math.min(FARM.y2, Math.max(FARM.y1, a.y + (Math.random() - 0.5) * 3));
       if (!'.F'.includes(tileAt(Math.floor(a.tx), Math.floor(a.ty)))) { a.tx = a.x; a.ty = a.y; }
       continue;
     }
     const sp = Math.min(d, dt / 1000 * 1.2);
     a.x += dx / d * sp; a.y += dy / d * sp;
     a.flip = dx < 0;
+  }
+}
+
+// 나무·바위·광석·작물 (다 캔 곳은 그루터기/돌무더기/빈 밭, 다시 자라는 중엔 묘목/새싹)
+function drawObj(o, sx, sy, t) {
+  const px = sx(o.x), py = sy(o.y);
+  const k = depKey(o.x, o.y);
+  const dep = o.k !== '#' && depleted(o.x, o.y);
+  if (dep) {
+    const res = RES_TILES[o.k];
+    const prog = 1 - Math.max(0, dep - now()) / (META.regrow[res] || 600);
+    if (o.k === 'T') {
+      if (prog > 0.5) drawTile(ctx, TILES.sapling, px, py);
+      else {
+        ctx.fillStyle = 'rgba(0,0,0,0.25)'; ctx.beginPath(); ctx.ellipse(px + 16, py + 28, 10, 3, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#6b4220'; ctx.fillRect(px + 9, py + 15, 14, 13);
+        ctx.fillStyle = '#4a2c14'; ctx.fillRect(px + 9, py + 15, 2, 13); ctx.fillRect(px + 21, py + 15, 2, 13);
+        ctx.fillStyle = '#d9a86a'; ctx.beginPath(); ctx.ellipse(px + 16, py + 15, 7, 3.5, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = '#a8743f'; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.ellipse(px + 16, py + 15, 3.5, 1.6, 0, 0, Math.PI * 2); ctx.stroke();
+      }
+    } else if (o.k === 'F') { if (prog > 0.5) drawTile(ctx, TILES.sprout, px, py); }
+    else { ctx.globalAlpha = 0.75; drawTile(ctx, TILES.rubble, px, py + 4, 28); ctx.globalAlpha = 1; }
+    return;
+  }
+  const since = shakeAt[k] ? t - shakeAt[k] : 999;
+  const sh = since < 260 ? Math.sin(since / 20) * 3 * (1 - since / 260) : 0;
+  if (o.tile) drawTile(ctx, o.tile, px + sh, py);
+  if (o.top) drawTile(ctx, o.top, px + sh * 1.6, py - TS);
+  if (o.k === 'm') {
+    const r = o.spark, glow = 0.6 + Math.sin(t / 300 + r * 9) * 0.4;
+    ctx.globalAlpha = glow;
+    ctx.fillStyle = r < 0.5 ? '#ff9f1c' : '#c9b8ff';
+    ctx.fillRect(px + 10 + ((r * 31) | 0) % 8 + sh, py + 14, 4, 4);
+    ctx.fillRect(px + 18 + sh, py + 20 - ((r * 17) | 0) % 6, 3, 3);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// 작업 중 도구가 대상에 닿는 순간: 대상 흔들림 + 파편
+const CHIP = { wood: ['#b07b45', '#e0b070', '#5a3a1a'], stone: ['#c0cbdc', '#ffffff', '#8b9bb4'],
+  ore: ['#ff9f1c', '#c9b8ff', '#ffffff'], food: ['#9bd35a', '#8b5a2b', '#e8c170'] };
+function impact(job, strong) {
+  shakeAt[depKey(job.tx, job.ty)] = performance.now();
+  const cols = CHIP[job.res];
+  if (!cols) return;
+  const t = performance.now();
+  for (let i = 0; i < (strong ? 6 : 2); i++) {
+    const a = -Math.PI / 2 + (Math.random() - 0.5) * 2.2, sp = 0.8 + Math.random() * 1.6;
+    parts.push({ x: job.tx + 0.5, y: job.ty + 0.6, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, t0: t, c: cols[i % cols.length] });
   }
 }
 
@@ -595,8 +690,7 @@ function canvasPoint(e) {
   return { px, py, wx: (px + cam.x) / TS, wy: (py + cam.y) / TS };
 }
 function monsterAt(wx, wy) {
-  if (!S || !S.raid) return null;
-  return S.raid.monsters.find((m) => { const p = rpos[m.id] || m; return Math.abs(p.x + 0.5 - wx) < 0.7 && Math.abs(p.y + 0.4 - wy) < 0.7; });
+  return allMonsters().find((m) => { const p = rpos[m.id] || m; return Math.abs(p.x + 0.5 - wx) < 0.7 && Math.abs(p.y + 0.4 - wy) < 0.7; });
 }
 function memberAt(wx, wy) {
   return Object.entries(S.members).find(([id]) => { const p = entityPos(id); return Math.abs(p.x + 0.5 - wx) < 0.5 && Math.abs(p.y + 0.3 - wy) < 0.6; });
@@ -639,7 +733,10 @@ cv.addEventListener('click', (e) => {
     return;
   }
   const t = tileAt(tx, ty);
-  if (RES_TILES[t]) gatherAt(tx, ty);
+  if (RES_TILES[t]) {
+    if (depleted(tx, ty)) return toast('이미 다 캔 곳이에요. 다시 자랄 때까지 기다려주세요.');
+    gatherAt(tx, ty);
+  }
 });
 
 function nearTile(x, y, reach = 1) {
@@ -661,7 +758,10 @@ function showCanvasTip(e) {
   const mem = memberAt(wx, wy);
   const b = buildingAt(wx, wy);
   const t = tileAt(tx, ty);
-  if (mon) h = `<b>${META.monsters[mon.kind] || mon.kind}</b> ${Math.max(0, Math.round(mon.hp))}/${mon.max_hp}<br><span class="muted">클릭: 공격</span>`;
+  if (mon) {
+    const w = META.wild[mon.kind];
+    h = `<b>${META.monsters[mon.kind] || mon.kind}</b> ${Math.max(0, Math.round(mon.hp))}/${mon.max_hp}${w ? ` · 공격력 ${w.atk}` : ''}<br><span class="muted">클릭: 공격</span>`;
+  }
   else if (bossAt(wx, wy)) h = `<b>동굴 트롤 ${S.boss.level}단계</b><br>${Math.round(S.boss.hp)}/${S.boss.max_hp}<br><span class="muted">클릭: 공격 (행동력 1)</span>`;
   else if (mem) {
     const [, m] = mem;
@@ -669,6 +769,8 @@ function showCanvasTip(e) {
   } else if (b) {
     const [bid] = b;
     h = `<b>${META.buildings[bid].name}</b> ${S.buildings[bid] ? `Lv.${S.buildings[bid]}` : '(미건설)'}<br><span class="muted">${esc(META.buildings[bid].desc)}</span>`;
+  } else if (RES_TILES[t] && depleted(tx, ty)) {
+    h = `<b>다 캔 자리</b><br><span class="muted">약 ${fmtDur(depleted(tx, ty) - now())} 뒤 다시 자라요</span>`;
   } else if (RES_TILES[t]) {
     const res = RES_TILES[t];
     const bld = META.jobs[res].building;
@@ -763,7 +865,7 @@ function updateMe(dt, t) {
     else if (auto && !auto.wps.length) { const done = auto.done; auto = null; if (done) done(); }
   }
   if (chase) {
-    const mon = S.raid && S.raid.monsters.find((q) => q.id === chase.id);
+    const mon = allMonsters().find((q) => q.id === chase.id);
     if (!mon) chase = null;
     else if (nearTile(mon.x, mon.y)) auto = null;
     else if (!auto || t > chase.repath) {
@@ -791,7 +893,7 @@ function spaceAction() {
   const fx_ = Math.floor(L.x), fy = Math.floor(L.y);
   for (const [dx, dy] of order) {
     const x = fx_ + dx, y = fy + dy;
-    if (RES_TILES[tileAt(x, y)]) return send({ t: 'gather', x, y });
+    if (RES_TILES[tileAt(x, y)] && !depleted(x, y)) return send({ t: 'gather', x, y });
   }
   toast('주변에 채집할 자원이 없어요. 나무·바위·물·밭 옆으로 가세요.');
 }
@@ -859,16 +961,21 @@ function draw(t, dt) {
 
   updateAnimals(dt);
 
-  // 건물 + 사람 + 몬스터를 y 순서로
+  // 건물 + 오브젝트 + 사람 + 몬스터를 y 순서로
   const ents = [];
+  const ty0 = Math.max(0, Math.floor(cy / TS) - 1), ty1 = Math.min(objRows.length - 1, Math.ceil((cy + H) / TS) + 2);
+  const tx0 = Math.floor(cx / TS) - 1, tx1 = Math.ceil((cx + W) / TS) + 1;
+  for (let y = ty0; y <= ty1; y++) {
+    for (const o of objRows[y]) if (o.x >= tx0 && o.x <= tx1) ents.push({ y: o.y + 0.85, f: () => drawObj(o, sx, sy, t) });
+  }
   for (const bid of Object.keys(META.building_pos)) ents.push({ y: META.building_pos[bid][1] + 0.9, f: () => drawBuilding(bid, t) });
   for (const [pid, m] of Object.entries(S.members)) {
     const r = pid === me && L ? rpos[me] : lerp(pid, m.x - 0.5, m.y - 0.5, dt);
     ents.push({ y: r.y, f: () => drawVillager(pid, m, r, sx, sy, t) });
   }
-  if (S.raid) for (const mo of S.raid.monsters) {
+  for (const mo of allMonsters()) {
     const r = lerp(mo.id, mo.x, mo.y, dt);
-    ents.push({ y: r.y, f: () => drawMonster(mo, r, sx, sy, t) });
+    if (sx(r.x) > -40 && sx(r.x) < W + 40 && sy(r.y) > -40 && sy(r.y) < H + 40) ents.push({ y: r.y, f: () => drawMonster(mo, r, sx, sy, t) });
   }
   for (const a of animals) ents.push({ y: a.y - 0.5, f: () => drawAnimal(a, sx, sy, t) });
   if (S.boss) {
@@ -887,6 +994,14 @@ function draw(t, dt) {
   }
   drawParticles(t, dt, sx, sy);
   drawNight(sx, sy, t);
+  if (t - hurtAt < 350) {   // 맞으면 화면 가장자리가 붉게
+    const k = 1 - (t - hurtAt) / 350;
+    const g = ctx.createRadialGradient(W / 2, H / 2, H * 0.3, W / 2, H / 2, H * 0.8);
+    g.addColorStop(0, 'rgba(255,0,0,0)');
+    g.addColorStop(1, `rgba(220,30,30,${0.45 * k})`);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+  }
   drawFx(cx, cy, t);
   drawHud(t);
   drawMinimap();
@@ -902,34 +1017,91 @@ function drawVillager(pid, m, r, sx, sy, t) {
   const off = (parseInt(pid.slice(0, 2), 16) % 5) - 2;
   const px = sx(r.x) + off * 4, py = sy(r.y) + (off % 2) * 3;
   if (px < -40 || px > W + 40 || py < -40 || py > H + 40) return;
-  const moving = r.moving;
-  const working = m.job && !moving;
-  let bob = moving ? -Math.abs(Math.sin(t / 70)) * 3 : 0;
-  if (working && m.online) bob = -Math.abs(Math.sin(t / 180)) * 2;
+  const job = m.job && !r.moving ? m.job : null;
+  let flip = r.flip, lean = 0, sqx = 1, sqy = 1, toolAng = null;
+  let bob = r.moving ? -Math.abs(Math.sin(t / 70)) * 3 : 0;
+  if (job) {
+    const tcx = job.tx + 0.5, mcx = r.x + 0.5;
+    if (Math.abs(tcx - mcx) > 0.2) flip = tcx < mcx;      // 일하는 대상을 바라본다
+    if (job.res === 'fish') bob = Math.sin(t / 500) * 1;
+    else {
+      const period = m.online ? 760 : 1500;
+      const seed = (parseInt(pid.slice(0, 4), 16) || 0) % period;
+      const p = ((t + seed) % period) / period;
+      // 0~0.55 도구를 들어 올리며 몸을 젖힘 → 0.55~0.68 내려침 → 회복
+      if (p < 0.55) { const k = p / 0.55; toolAng = -0.3 - 1.7 * k; lean = -2 * k; }
+      else if (p < 0.68) { const k = (p - 0.55) / 0.13; toolAng = -2.0 + 2.7 * k; lean = -2 + 6 * k; }
+      else { const k = (p - 0.68) / 0.32; toolAng = 0.7 - 1.0 * k; lean = 4 - 4 * k; }
+      if (p >= 0.66 && p < 0.8) { sqx = 1.08; sqy = 0.9; }
+      const wa = workAnim[pid] || (workAnim[pid] = { p: 0 });
+      if (wa.p < 0.66 && p >= 0.66) impact(job, m.online);
+      wa.p = p;
+    }
+  }
+  const since = attackAt[pid] ? t - attackAt[pid] : 9999;
+  if (!job && since < 320) {   // 몬스터 공격
+    const k = since / 320;
+    toolAng = k < 0.4 ? -1.8 * (k / 0.4) : -1.8 + 2.6 * ((k - 0.4) / 0.6);
+    lean = k < 0.4 ? -2 : 4 * (1 - k);
+  }
+  const dir = flip ? -1 : 1;
   ctx.fillStyle = 'rgba(0,0,0,0.3)';
-  ctx.beginPath(); ctx.ellipse(px + 16, py + 29, 9, 3, 0, 0, Math.PI * 2); ctx.fill();
-  ctx.globalAlpha = m.online ? 1 : 0.55;
-  drawFlipped(heroOf(pid), px, py + bob, r.flip);
-  // 하는 일 표시
-  if (working) {
-    const swing = m.online ? Math.sin(t / 150) * 0.6 : 0.2;
-    ctx.save();
-    ctx.translate(px + 26, py + 16);
-    ctx.rotate(swing);
-    drawResIcon(ctx, m.job.res, -6, -14, 14);
-    ctx.restore();
+  ctx.beginPath(); ctx.ellipse(px + 16, py + 29, 9 * sqx, 3, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.globalAlpha = m.online ? 1 : 0.6;
+  const hurt = flashAt[pid] && t - flashAt[pid] < 120;
+  if (hurt) ctx.filter = 'brightness(2.2) sepia(1) hue-rotate(-50deg) saturate(4)';
+  // 발을 기준으로 기울이고 찌그러뜨리기
+  ctx.save();
+  ctx.translate(px + 16 + lean * dir, py + 32 + bob);
+  ctx.scale(sqx * dir, sqy);
+  drawTile(ctx, heroOf(pid), -16, -32);
+  ctx.restore();
+  ctx.filter = 'none';
+  // 손에 든 것
+  const hx = px + 16 + lean * dir + dir * 7, hy = py + 21 + bob;
+  if (job && job.res === 'fish') drawFishing(job, hx, hy, dir, sx, sy, t);
+  else if (toolAng !== null) {
+    const tool = job ? WORK_TOOL[job.res] : GEAR_TILE[m.eq && m.eq.weapon];
+    if (tool) {
+      ctx.save();
+      ctx.translate(hx, hy);
+      ctx.scale(dir, 1);
+      ctx.rotate(toolAng);
+      drawTile(ctx, tool, -5, -20, 20);
+      ctx.restore();
+    }
   }
   ctx.globalAlpha = 1;
-  // 이름
+  // 이름 + 다쳤으면 체력
   ctx.font = FONT(11);
   ctx.textAlign = 'center';
   const name = m.name + (m.online ? '' : ' (zZ)');
   ctx.fillStyle = '#000b'; ctx.fillText(name, px + 17, py - 3);
   ctx.fillStyle = m.online ? m.color : '#c8c8c8'; ctx.fillText(name, px + 16, py - 4);
+  if (m.max_hp && m.hp < m.max_hp) {
+    ctx.fillStyle = '#000'; ctx.fillRect(px + 2, py - 1, 28, 4);
+    ctx.fillStyle = '#5fbf4f'; ctx.fillRect(px + 2, py - 1, 28 * Math.max(0, m.hp / m.max_hp), 4);
+  }
   if (pid === me) {
     ctx.fillStyle = '#f5c542';
     const ty = py - 24 + Math.sin(t / 200) * 2;
     ctx.beginPath(); ctx.moveTo(px + 12, ty); ctx.lineTo(px + 20, ty); ctx.lineTo(px + 16, ty + 5); ctx.fill();
+  }
+}
+
+// 낚싯대 + 줄 + 찌
+function drawFishing(job, hx, hy, dir, sx, sy, t) {
+  const tipX = hx + dir * 16, tipY = hy - 18;
+  ctx.strokeStyle = '#8b5a2b'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(hx, hy); ctx.lineTo(tipX, tipY); ctx.stroke();
+  const bx = sx(job.tx + 0.5), by = sy(job.ty + 0.5) + Math.sin(t / 350) * 2;
+  ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(tipX, tipY); ctx.quadraticCurveTo((tipX + bx) / 2, Math.max(tipY, by) + 6, bx, by); ctx.stroke();
+  ctx.fillStyle = '#e0524a'; ctx.fillRect(bx - 2, by - 3, 4, 3);
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(bx - 2, by, 4, 2);
+  if (Math.sin(t / 900) > 0.97) {     // 가끔 물이 튐
+    ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+    ctx.beginPath(); ctx.ellipse(bx, by + 3, 7, 2.5, 0, 0, Math.PI * 2); ctx.stroke();
   }
 }
 
@@ -942,8 +1114,10 @@ function drawMonster(mo, r, sx, sy, t) {
   if (flash) ctx.filter = 'brightness(3)';
   drawFlipped(MONSTER_TILE[mo.kind] || MONSTER_TILE.wolf, px, py + Math.sin(t / 200 + px) * 1.5, r.flip);
   ctx.filter = 'none';
-  ctx.fillStyle = '#000'; ctx.fillRect(px + 2, py - 4, 28, 4);
-  ctx.fillStyle = '#e0524a'; ctx.fillRect(px + 2, py - 4, 28 * Math.max(0, mo.hp / mo.max_hp), 4);
+  if (mo.hp < mo.max_hp || !String(mo.id).startsWith('w')) {
+    ctx.fillStyle = '#000'; ctx.fillRect(px + 2, py - 4, 28, 4);
+    ctx.fillStyle = '#e0524a'; ctx.fillRect(px + 2, py - 4, 28 * Math.max(0, mo.hp / mo.max_hp), 4);
+  }
 }
 
 // 타일을 좌우 반전해서 그리기
@@ -1034,7 +1208,7 @@ function drawNight(sx, sy) {
 }
 
 function drawMinimap() {
-  const s = 3, w = mapRows[0].length * s, h = mapRows.length * s;
+  const s = 2, w = mapRows[0].length * s, h = mapRows.length * s;
   const ox = W - w - 8, oy = 8;
   if (!drawMinimap.cache || drawMinimap.bridge !== mapBridge) {
     const c = document.createElement('canvas');
@@ -1056,7 +1230,7 @@ function drawMinimap() {
     if (!S.buildings[bid]) continue;
     ctx.fillStyle = '#e8d9b5'; ctx.fillRect(ox + x * s - 1, oy + y * s - 1, 4, 4);
   }
-  if (S.raid) for (const mo of S.raid.monsters) { ctx.fillStyle = '#ff3b2f'; ctx.fillRect(ox + mo.x * s, oy + mo.y * s, 3, 3); }
+  for (const mo of allMonsters()) { ctx.fillStyle = mo.id.startsWith('w') ? '#a02020' : '#ff3b2f'; ctx.fillRect(ox + mo.x * s, oy + mo.y * s, 2, 2); }
   for (const m of Object.values(S.members)) {
     ctx.fillStyle = m.online ? m.color : '#888';
     ctx.fillRect(ox + m.x * s - 1, oy + m.y * s - 1, 4, 4);
@@ -1070,6 +1244,14 @@ function drawHud(t) {
   const m = myMember();
   if (!m) return;
   const x = 10, y = H - 70, w = 360, h = 60;
+  // 체력바
+  ctx.fillStyle = 'rgba(0,0,0,0.65)';
+  ctx.fillRect(x, y - 18, w, 14);
+  ctx.fillStyle = '#5a1a1a'; ctx.fillRect(x + 2, y - 16, w - 4, 10);
+  ctx.fillStyle = m.hp < m.max_hp * 0.3 ? '#e0524a' : '#5fbf4f';
+  ctx.fillRect(x + 2, y - 16, (w - 4) * Math.max(0, m.hp / m.max_hp), 10);
+  ctx.font = FONT(10); ctx.textAlign = 'center'; ctx.fillStyle = '#fff';
+  ctx.fillText(`체력 ${m.hp} / ${m.max_hp}`, x + w / 2, y - 7);
   ctx.fillStyle = 'rgba(0,0,0,0.65)';
   ctx.fillRect(x, y, w, h);
   ctx.strokeStyle = '#3f3a4d';

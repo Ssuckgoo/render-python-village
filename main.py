@@ -11,7 +11,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from village import db
-from village.data import (BUILDING_POS, BUILDINGS, ENERGY_MAX, ENERGY_REGEN, JOBS, MONSTER_NAMES,
+from village.data import (BUILDING_POS, BUILDING_W, BUILDINGS, ENERGY_MAX, ENERGY_REGEN, GEAR, JOBS, MONSTER_NAMES,
+                          REGROW, SAFE_RADIUS, WILD,
                           OFFLINE_CAP, RESOURCES, SPAWN, TOOL_MAX, TOOLS, tool_price)
 from village.world import BASE_MAP, Village, VillageError, new_village
 
@@ -161,6 +162,7 @@ async def healthz():
 @app.get("/api/meta")
 async def meta():
     return {"resources": RESOURCES, "buildings": BUILDINGS, "building_pos": BUILDING_POS, "jobs": JOBS,
+            "building_w": BUILDING_W, "gear": GEAR, "wild": WILD, "regrow": REGROW, "safe_radius": SAFE_RADIUS,
             "map": BASE_MAP, "spawn": SPAWN, "tools": TOOLS, "tool_max": TOOL_MAX,
             "tool_prices": [tool_price(i) for i in range(TOOL_MAX)], "monsters": MONSTER_NAMES,
             "energy_max": ENERGY_MAX, "energy_regen": ENERGY_REGEN, "offline_cap": OFFLINE_CAP,
@@ -245,7 +247,7 @@ async def ws_endpoint(ws: WebSocket, code: str):
                 elif msg.get("t") == "pos":
                     continue  # 위치는 틱 루프가 모아서 방송
                 else:
-                    await room.flush(force=msg.get("t") in ("build", "buy"))
+                    await room.flush(force=msg.get("t") in ("build", "buy", "craft", "equip"))
     except (WebSocketDisconnect, RuntimeError):
         pass
     finally:
@@ -278,6 +280,10 @@ def handle(v: Village, pid: str, msg: dict):
         return v.boss_attack(pid, now)
     if t == "buy":
         return v.buy_tool(pid, str(msg["kind"]))
+    if t == "craft":
+        return v.craft(pid, str(msg["id"]))
+    if t == "equip":
+        return v.equip(pid, str(msg["id"]))
     if t == "chat":
         text = str(msg.get("text", "")).strip()
         if not text:
