@@ -26,6 +26,7 @@ let L = null;                  // 내 위치
 let auto = null;               // 자동 걷기 {wps: [[x, y]...], done}
 let chase = null;              // 쫓아가는 습격 몬스터 {id, repath}
 let meMoving = false;
+let meFlip = false;            // 왼쪽을 보고 있는지 (Kenney 캐릭터는 기본이 오른쪽)
 let lastSent = { x: 0, y: 0, t: 0 };
 
 // ---------------- 공통 ----------------
@@ -830,6 +831,8 @@ function lerp(id, x, y, dt) {
   if (!r || Math.abs(r.x - x) + Math.abs(r.y - y) > 4) return (rpos[id] = { x, y, moving: false });
   const k = Math.min(1, dt / 110);
   r.moving = Math.hypot(x - r.x, y - r.y) > 0.04;
+  if (x - r.x < -0.03) r.flip = true;        // 왼쪽으로 가면 왼쪽을 본다
+  else if (x - r.x > 0.03) r.flip = false;
   r.x += (x - r.x) * k;
   r.y += (y - r.y) * k;
   return r;
@@ -837,9 +840,12 @@ function lerp(id, x, y, dt) {
 
 function draw(t, dt) {
   ctx.imageSmoothingEnabled = false;
+  const prevX = L ? L.x : 0;
   updateMe(dt, t);
   if (L) {
-    rpos[me] = { x: L.x - 0.5, y: L.y - 0.5, moving: meMoving };
+    if (L.x < prevX - 1e-4) meFlip = true;
+    else if (L.x > prevX + 1e-4) meFlip = false;
+    rpos[me] = { x: L.x - 0.5, y: L.y - 0.5, moving: meMoving, flip: meFlip };
     const gx = Math.max(0, Math.min(mapCache.width - W, L.x * TS - W / 2));
     const gy = Math.max(0, Math.min(mapCache.height - H, L.y * TS - H / 2));
     cam.x += (gx - cam.x) * Math.min(1, dt / 80);
@@ -903,7 +909,7 @@ function drawVillager(pid, m, r, sx, sy, t) {
   ctx.fillStyle = 'rgba(0,0,0,0.3)';
   ctx.beginPath(); ctx.ellipse(px + 16, py + 29, 9, 3, 0, 0, Math.PI * 2); ctx.fill();
   ctx.globalAlpha = m.online ? 1 : 0.55;
-  drawTile(ctx, heroOf(pid), px, py + bob);
+  drawFlipped(heroOf(pid), px, py + bob, r.flip);
   // 하는 일 표시
   if (working) {
     const swing = m.online ? Math.sin(t / 150) * 0.6 : 0.2;
@@ -934,10 +940,20 @@ function drawMonster(mo, r, sx, sy, t) {
   ctx.fillStyle = 'rgba(0,0,0,0.3)';
   ctx.beginPath(); ctx.ellipse(px + 16, py + 29, 9, 3, 0, 0, Math.PI * 2); ctx.fill();
   if (flash) ctx.filter = 'brightness(3)';
-  drawTile(ctx, MONSTER_TILE[mo.kind] || MONSTER_TILE.wolf, px, py + Math.sin(t / 200 + px) * 1.5);
+  drawFlipped(MONSTER_TILE[mo.kind] || MONSTER_TILE.wolf, px, py + Math.sin(t / 200 + px) * 1.5, r.flip);
   ctx.filter = 'none';
   ctx.fillStyle = '#000'; ctx.fillRect(px + 2, py - 4, 28, 4);
   ctx.fillStyle = '#e0524a'; ctx.fillRect(px + 2, py - 4, 28 * Math.max(0, mo.hp / mo.max_hp), 4);
+}
+
+// 타일을 좌우 반전해서 그리기
+function drawFlipped(tile, x, y, flip, size = TS) {
+  if (!flip) return drawTile(ctx, tile, x, y, size);
+  ctx.save();
+  ctx.translate(x + size, 0);
+  ctx.scale(-1, 1);
+  drawTile(ctx, tile, 0, y, size);
+  ctx.restore();
 }
 
 function drawAnimal(a, sx, sy, t) {
