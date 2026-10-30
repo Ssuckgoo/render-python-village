@@ -113,6 +113,9 @@ const MONSTER_TILE = {
 const ANIMALS = [fm(122), fm(122), fm(122), fm(120), fm(120), fm(121)];
 // 일할 때 손에 드는 도구 (낚시는 낚싯줄을 직접 그림)
 const WORK_TOOL = { wood: fm(87), stone: tw(115), ore: tw(115), food: fm(88) };
+// 도구 그림에서 손잡이 x 위치(16px 기준)와 날이 왼쪽을 향하는지. 휘두를 때 손잡이를 축으로, 날이 앞을 향하게 한다
+const GRIP = { 'farm:87': { gx: 11, mirror: true }, 'farm:88': { gx: 7.5, mirror: true }, 'town:129': { gx: 11, mirror: true } };
+function gripOf(t) { return GRIP[t.join(':')] || { gx: 8, mirror: false }; }
 const GEAR_TILE = {
   club: dg(117), stone_axe: dg(118), iron_sword: dg(104), crystal_sword: dg(106),
   leather_armor: dg(101), iron_armor: dg(102), crystal_armor: dg(102),

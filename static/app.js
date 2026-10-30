@@ -1028,10 +1028,11 @@ function drawVillager(pid, m, r, sx, sy, t) {
       const period = m.online ? 760 : 1500;
       const seed = (parseInt(pid.slice(0, 4), 16) || 0) % period;
       const p = ((t + seed) % period) / period;
-      // 0~0.55 도구를 들어 올리며 몸을 젖힘 → 0.55~0.68 내려침 → 회복
-      if (p < 0.55) { const k = p / 0.55; toolAng = -0.3 - 1.7 * k; lean = -2 * k; }
-      else if (p < 0.68) { const k = (p - 0.55) / 0.13; toolAng = -2.0 + 2.7 * k; lean = -2 + 6 * k; }
-      else { const k = (p - 0.68) / 0.32; toolAng = 0.7 - 1.0 * k; lean = 4 - 4 * k; }
+      // 각도 0 = 도구를 세운 자세, 음수 = 뒤로 젖힘, 양수 = 바라보는 쪽으로 내려침
+      // 0~0.55 머리 뒤로 들어 올림 → 0.55~0.68 앞으로 내려침 → 회복
+      if (p < 0.55) { const k = p / 0.55; toolAng = -0.2 - 1.5 * k; lean = -2 * k; }
+      else if (p < 0.68) { const k = (p - 0.55) / 0.13; toolAng = -1.7 + 3.2 * k; lean = -2 + 6 * k; }
+      else { const k = (p - 0.68) / 0.32; toolAng = 1.5 - 1.7 * k; lean = 4 - 4 * k; }
       if (p >= 0.66 && p < 0.8) { sqx = 1.08; sqy = 0.9; }
       const wa = workAnim[pid] || (workAnim[pid] = { p: 0 });
       if (wa.p < 0.66 && p >= 0.66) impact(job, m.online);
@@ -1041,7 +1042,7 @@ function drawVillager(pid, m, r, sx, sy, t) {
   const since = attackAt[pid] ? t - attackAt[pid] : 9999;
   if (!job && since < 320) {   // 몬스터 공격
     const k = since / 320;
-    toolAng = k < 0.4 ? -1.8 * (k / 0.4) : -1.8 + 2.6 * ((k - 0.4) / 0.6);
+    toolAng = k < 0.4 ? -1.7 * (k / 0.4) : -1.7 + 3.2 * ((k - 0.4) / 0.6);
     lean = k < 0.4 ? -2 : 4 * (1 - k);
   }
   const dir = flip ? -1 : 1;
@@ -1067,7 +1068,10 @@ function drawVillager(pid, m, r, sx, sy, t) {
       ctx.translate(hx, hy);
       ctx.scale(dir, 1);
       ctx.rotate(toolAng);
-      drawTile(ctx, tool, -5, -20, 20);
+      // 손잡이 아래쪽을 손에 맞추고, 날이 왼쪽인 그림은 뒤집어서 날이 앞을 향하게
+      const g = gripOf(tool), sc = 20 / 16;
+      if (g.mirror) ctx.scale(-1, 1);
+      drawTile(ctx, tool, -g.gx * sc, -13 * sc, 20);
       ctx.restore();
     }
   }
