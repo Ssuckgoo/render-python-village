@@ -8,6 +8,7 @@ import math
 import random
 import secrets
 import time
+from collections import deque
 
 from .data import (ACTIVE_AMOUNT, ACTIVE_COOLDOWN, ATTACK_COOLDOWN, BOSS_GROWTH, BOSS_HP, BUILDING_POS,
                    BUILDINGS, COIN_PER_UNIT, ENERGY_MAX, ENERGY_REGEN, GATHER, GEAR, HP_PER_COMBAT_LV,
@@ -26,6 +27,24 @@ BASE_MAP = make_map()
 RADIUS = 0.3
 DIRS8 = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)]
 TICK = 0.2
+
+
+def _reachable():
+    """시작 지점에서 걸어갈 수 있는 칸 (다리는 지었다고 보고). 몬스터는 여기에만 생긴다."""
+    ok = lambda x, y: 0 <= x < MAP_W and 0 <= y < MAP_H and (BASE_MAP[y][x] in WALKABLE or BASE_MAP[y][x] == "b")
+    seen = {SPAWN}
+    stack = [SPAWN]
+    while stack:
+        x, y = stack.pop()
+        for dx, dy in DIRS8:
+            n = (x + dx, y + dy)
+            if n not in seen and ok(*n) and (not (dx and dy) or (ok(x + dx, y) and ok(x, y + dy))):
+                seen.add(n)
+                stack.append(n)
+    return seen
+
+
+REACH = _reachable()
 
 
 class VillageError(Exception):
@@ -70,6 +89,7 @@ class Village:
         self.messages = []       # (pid, text) 개인 알림
         self.rng = random.Random()
         self.uid = 0
+        self.mpaths = {}         # 몬스터 id -> {"goal", "p", "t"} 길찾기 캐시
         self.migrate()
         self.rebuild_map()
         self.fix_positions()
@@ -104,7 +124,7 @@ class Village:
             if job and (TILE_RES.get(self.tile(job["tx"], job["ty"])) != job["res"]
                         or key(job["tx"], job["ty"]) in self.d["dep"]):
                 m["job"] = None
-        self.d["wild"] = [w for w in self.d["wild"] if self.walkable(w["x"], w["y"])]
+        self.d["wild"] = [w for w in self.d["wild"] if (w["x"], w["y"]) in REACH and self.walkable(w["x"], w["y"])]
 
     # ---------- 지도 ----------
     def rebuild_map(self):
@@ -129,6 +149,35 @@ class Village:
         w = self.walkable
         return (w(int(x - r), int(y - r)) and w(int(x + r), int(y - r))
                 and w(int(x - r), int(y + r)) and w(int(x + r), int(y + r)))
+
+    def path(self, src, dst, limit=6000):
+        """src에서 dst까지 칸 경로(src 제외). limit칸 넘게 찾아봐도 없으면 None."""
+        if src == dst:
+            return []
+        if not self.walkable(*dst):
+            return None
+        prev = {src: None}
+        q = deque([src])
+        while q and len(prev) < limit:
+            cur = q.popleft()
+            if cur == dst:
+                break
+            x, y = cur
+            for dx, dy in DIRS8:
+                n = (x + dx, y + dy)
+                if n in prev or not self.walkable(*n):
+                    continue
+                if dx and dy and not (self.walkable(x + dx, y) and self.walkable(x, y + dy)):
+                    continue
+                prev[n] = cur
+                q.append(n)
+        if dst not in prev:
+            return None
+        out, cur = [], dst
+        while cur != src:
+            out.append(cur)
+            cur = prev[cur]
+        return out[::-1]
 
     def stands(self, tx, ty):
         """자원 (tx, ty)를 캘 때 설 수 있는 칸들. 밭은 그 위도 된다."""
@@ -667,7 +716,7 @@ class Village:
         kinds = [k for k, w in WILD.items() if w["zone"] == zone]
         for _ in range(40):
             x, y = self.rng.randint(x1, x2), self.rng.randint(y1, y2)
-            if not self.walkable(x, y) or cheb(x, y, *SPAWN) <= SAFE_RADIUS:
+            if not self.walkable(x, y) or (x, y) not in REACH or cheb(x, y, *SPAWN) <= SAFE_RADIUS:
                 continue
             if any(cheb(x, y, int(self.member(p)["x"]), int(self.member(p)["y"])) < 8 for p in self.online):
                 continue
@@ -685,6 +734,28 @@ class Village:
             if alive < z["count"] and d["wild_next"].get(zone, 0) <= now:
                 self.spawn_wild(zone, now)
                 d["wild_next"][zone] = now + 8  # 한 번에 몰려 나오지 않게
+
+    def move_toward(self, mon, tx, ty, now, adjacent=False):
+        """길을 찾아 한 칸 다가가기. 나무·바위를 돌아서 간다. adjacent면 바로 옆 칸에서 멈춘다."""
+        goal = (tx, ty)
+        st = self.mpaths.get(mon["id"])
+        if not st or st["goal"] != goal or not st["p"] or now >= st["t"]:
+            p = self.path((mon["x"], mon["y"]), goal, limit=900)
+            if p is None:
+                return self.step_toward(mon, tx, ty)
+            if adjacent:
+                p = p[:-1]
+            st = self.mpaths[mon["id"]] = {"goal": goal, "p": p, "t": now + 1.0}
+        if not st["p"]:
+            return False
+        nx, ny = st["p"][0]
+        if not self.walkable(nx, ny) or cheb(nx, ny, mon["x"], mon["y"]) > 1:
+            st["p"] = []
+            return False
+        st["p"].pop(0)
+        mon["x"], mon["y"] = nx, ny
+        self.moved = True
+        return True
 
     def step_toward(self, mon, tx, ty):
         """한 칸 다가가기 (대각선 먼저, 막히면 가로/세로)."""
@@ -718,18 +789,27 @@ class Village:
                 dist = cheb(px, py, mon["x"], mon["y"])
                 if (dist <= WILD_AGGRO or mon.get("angry") == pid) and (not prey or dist < prey[0]):
                     prey = (dist, pid, px, py)
-            if prey and cheb(mon["x"], mon["y"], hx, hy) <= WILD_LEASH:
+            # 너무 멀리 쫓아왔으면 집에 도착할 때까지 돌아간다 (경계에서 왔다 갔다 하며 멈추지 않게)
+            if cheb(mon["x"], mon["y"], hx, hy) > WILD_LEASH:
+                mon["returning"] = True
+                mon.pop("angry", None)
+            if mon.get("returning"):
+                if cheb(mon["x"], mon["y"], hx, hy) <= 1 or not self.move_toward(mon, hx, hy, now):
+                    mon.pop("returning", None)
+                    mon["hp"] = mon["max_hp"]
+                continue
+            if prey:
                 dist, pid, px, py = prey
                 if dist <= 1:
                     if self.cd.get((mon["id"], "atk"), 0) <= now:
                         self.cd[(mon["id"], "atk")] = now + WILD_ATTACK_CD
                         self.hurt(pid, round(w["atk"] * self.rng.uniform(0.8, 1.2)), mon["id"], now)
                 else:
-                    self.step_toward(mon, px, py)
+                    self.move_toward(mon, px, py, now, adjacent=True)
                 continue
             mon.pop("angry", None)
-            if (mon["x"], mon["y"]) != (hx, hy) and cheb(mon["x"], mon["y"], hx, hy) > 2:
-                self.step_toward(mon, hx, hy)  # 집으로
+            if cheb(mon["x"], mon["y"], hx, hy) > 2:
+                self.move_toward(mon, hx, hy, now)  # 집으로
             elif self.rng.random() < 0.12:
                 dx, dy = self.rng.choice(DIRS8)
                 if self.walkable(mon["x"] + dx, mon["y"] + dy) and cheb(mon["x"] + dx, mon["y"] + dy, hx, hy) <= 3:
@@ -844,7 +924,7 @@ class Village:
             wx, wy = BUILDING_POS["warehouse"]
             for mon in raid["monsters"]:
                 if self.rng.random() < 0.15 and cheb(mon["x"], mon["y"], wx, wy) > 1:
-                    self.step_toward(mon, wx, wy)
+                    self.move_toward(mon, wx, wy + 1, now)
         if self.online:
             self.wild_move(now)
 

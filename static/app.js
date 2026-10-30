@@ -92,6 +92,7 @@ async function init() {
   $('#code').onkeydown = (e) => { if (e.key === 'Enter') $('#btn-join').click(); };
   $('#btn-create').onclick = createVillage;
   $('#vname').onkeydown = (e) => { if (e.key === 'Enter') createVillage(); };
+  $('#btn-gear').onclick = () => toggleGear();
   $('#btn-copy').onclick = () => {
     const url = `${location.origin}/?v=${code}`;
     navigator.clipboard.writeText(url).then(() => toast('초대 링크를 복사했습니다.'), () => toast(url));
@@ -206,6 +207,7 @@ function applyState(s) {
   }
   renderTop();
   renderSide();
+  renderGear();
 }
 
 function applyTick(m) {
@@ -418,20 +420,76 @@ function renderMe() {
   for (const [k, v] of Object.entries(m.skills)) {
     h += `<span>${k === 'combat' ? '전투' : VERB[k]} <b>Lv.${v}</b> <span class="muted">(${m.xp[k]}xp)</span></span>`;
   }
-  h += `</div>${gearHTML(m, smithy)}<h4>도구 ${smithy ? `<span class="muted">(대장간 Lv.${smithy}까지)</span>` : '<span class="muted">— 대장간을 지으면 살 수 있어요</span>'}</h4>`;
-  for (const [k, name] of Object.entries(META.tools)) {
-    const lvl = m.tools[k];
-    const price = META.tool_prices[lvl];
-    const can = smithy && lvl < Math.min(META.tool_max, smithy) && m.coins >= price;
-    h += `<div class="tool">${resImg(k, 18)}<span class="nm">${name} <b>+${lvl}</b>
-      <span class="muted">채집 +15%/단계</span></span>
-      ${lvl < META.tool_max ? `<button class="btn small" data-buy="${k}" ${can ? '' : 'disabled'}>${price}동전</button>` : '<span class="muted">최대</span>'}</div>`;
-  }
-  h += `<p class="muted">동전은 채집(10개당 1), 몬스터 사냥, 습격 방어, 보스 공격으로 얻어요.</p>
+  const w = META.gear[m.eq.weapon], a = META.gear[m.eq.armor];
+  h += `</div><h4>장비</h4><div class="tool"><span class="nm">${w ? w.name : '무기 없음'} · ${a ? a.name : '갑옷 없음'}</span>
+    <button class="btn small" data-open-gear>장비창 열기 (I)</button></div>
+    <p class="muted">동전은 채집(10개당 1), 몬스터 사냥, 습격 방어, 보스 공격으로 얻어요.</p>
     <h4>마을 기록</h4><div class="muted">습격 방어 ${S.stats.raids_won} · 실패 ${S.stats.raids_lost} · 보스 처치 ${S.stats.bosses} · 사냥 ${S.stats.kills || 0}</div>`;
   $('#tab-me').innerHTML = h;
 }
 $('#tab-me').addEventListener('click', (e) => {
+  if (e.target.closest('[data-open-gear]')) toggleGear(true);
+});
+
+// ---------------- 장비창 ----------------
+let gearOpen = false;
+function toggleGear(open) {
+  gearOpen = open === undefined ? !gearOpen : open;
+  $('#win-gear').hidden = !gearOpen;
+  if (gearOpen) { releaseAll(); renderGear(); }
+}
+const SLOT_NAME = { weapon: '무기', armor: '갑옷' };
+function statOf(g) { return g.slot === 'weapon' ? `공격 +${g.atk}` : `방어 +${g.df} · 체력 +${g.hp}`; }
+function diffOf(g, cur) {
+  if (!cur || cur === g) return '';
+  const d = g.slot === 'weapon' ? [['공격', g.atk - cur.atk]] : [['방어', g.df - cur.df], ['체력', g.hp - cur.hp]];
+  return d.filter(([, v]) => v).map(([k, v]) => `<span class="${v > 0 ? 'up' : 'down'}">${k} ${v > 0 ? '+' : ''}${v}</span>`).join(' ');
+}
+function renderGear() {
+  const m = myMember();
+  if (!m || !gearOpen) return;
+  const smithy = S.buildings.smithy;
+  const w = META.gear[m.eq.weapon], a = META.gear[m.eq.armor];
+  const slot = (key, g, gid) => `<div class="slot ${g ? 'filled' : 'empty'}" title="${g ? `${g.name} · ${statOf(g)}` : ''}">
+    ${tileImg(g ? GEAR_TILE[gid] : (key === 'weapon' ? GEAR_TILE.club : GEAR_TILE.leather_armor), 40)}
+    <span>${g ? g.name : '비어 있음'}</span><span class="sn">${SLOT_NAME[key]}</span></div>`;
+  const atk = 6 + (w ? w.atk : 0) + m.skills.combat, df = a ? a.df : 0;
+  let L_ = `<div class="doll">${slot('weapon', w, m.eq.weapon)}<div class="hero">${tileImg(heroOf(me), 96)}</div>${slot('armor', a, m.eq.armor)}</div>
+    <div class="muted">체력 ${m.hp} / ${m.max_hp}</div><div class="hpbar"><div style="width:${(m.hp / m.max_hp) * 100}%"></div></div>
+    <div class="gstats"><span>공격력 <b>${atk}</b></span><span>방어력 <b>${df}</b></span>
+      <span>전투 Lv <b>${m.skills.combat}</b></span><span>동전 <b>${m.coins}</b></span></div>
+    <h4>채집 도구 ${smithy ? `<span class="muted">(대장간 Lv.${smithy}까지 강화)</span>` : '<span class="muted">— 대장간이 있어야 강화</span>'}</h4>`;
+  for (const [k, name] of Object.entries(META.tools)) {
+    const lvl = m.tools[k], price = META.tool_prices[lvl];
+    const can = smithy && lvl < Math.min(META.tool_max, smithy) && m.coins >= price;
+    L_ += `<div class="gitem">${resImg(k, 22)}<span class="nm">${name} <b>+${lvl}</b><br><span class="muted">채집 +${lvl * 15}%</span></span>
+      ${lvl < META.tool_max ? `<button class="btn small" data-buy="${k}" ${can ? '' : 'disabled'}>${price}동전</button>` : '<span class="muted">최대</span>'}</div>`;
+  }
+  $('#gear-left').innerHTML = L_;
+  let R = '';
+  for (const key of ['weapon', 'armor']) {
+    R += `<h4>${SLOT_NAME[key]}</h4>`;
+    const cur = META.gear[m.eq[key]];
+    for (const [gid, g] of Object.entries(META.gear)) {
+      if (g.slot !== key) continue;
+      const owned = m.gear.includes(gid), worn = m.eq[key] === gid;
+      const needSmithy = g.smithy && smithy < g.smithy;
+      const short = Object.entries(g.cost).some(([r, v]) => S.res[r] < v) || m.coins < g.coins;
+      let btn;
+      if (worn) btn = '<span class="muted">착용 중</span>';
+      else if (owned) btn = `<button class="btn small primary" data-equip="${gid}">장착</button>`;
+      else btn = `<button class="btn small" data-craft="${gid}" ${needSmithy || short ? 'disabled' : ''}>제작</button>`;
+      R += `<div class="gitem ${worn ? 'worn' : ''} ${!owned && needSmithy ? 'locked' : ''}">${tileImg(GEAR_TILE[gid], 32)}
+        <span class="nm"><b>${g.name}</b> <span class="muted">${statOf(g)}</span> ${diffOf(g, cur)}
+        ${owned ? '<div class="muted">보유</div>' : `<div class="cost">${costHTML(g.cost)}${g.coins ? `<span>${resImg('gold', 12)}${g.coins}동전</span>` : ''}
+        ${needSmithy ? `<span class="muted">대장간 Lv.${g.smithy} 필요</span>` : ''}</div>`}</span>${btn}</div>`;
+    }
+  }
+  R += '<p class="muted">재료는 마을 창고에서, 동전은 내 지갑에서 나가요. 가죽은 늑대·쥐 같은 야생 몬스터에게서 얻어요.</p>';
+  $('#gear-right').innerHTML = R;
+}
+$('#win-gear').addEventListener('click', (e) => {
+  if (e.target.closest('[data-close]')) return toggleGear(false);
   const b = e.target.closest('[data-buy]');
   if (b) return send({ t: 'buy', kind: b.dataset.buy });
   const c = e.target.closest('[data-craft]');
@@ -440,25 +498,6 @@ $('#tab-me').addEventListener('click', (e) => {
   if (q) send({ t: 'equip', id: q.dataset.equip });
 });
 
-// 전투 장비: 마을 창고 자원 + 내 동전으로 제작
-function gearHTML(m, smithy) {
-  const weapon = META.gear[m.eq.weapon], armor = META.gear[m.eq.armor];
-  let h = `<h4>전투 <span class="muted">체력 ${m.hp}/${m.max_hp} · 공격 ${6 + (weapon ? weapon.atk : 0) + m.skills.combat} · 방어 ${armor ? armor.df : 0}</span></h4>`;
-  for (const [gid, g] of Object.entries(META.gear)) {
-    const owned = m.gear.includes(gid), worn = m.eq[g.slot] === gid;
-    const stat = g.slot === 'weapon' ? `공격 +${g.atk}` : `방어 +${g.df}, 체력 +${g.hp}`;
-    const needSmithy = g.smithy && smithy < g.smithy;
-    const short = Object.entries(g.cost).some(([r, v]) => S.res[r] < v) || m.coins < g.coins;
-    let btn;
-    if (worn) btn = '<span class="muted">착용 중</span>';
-    else if (owned) btn = `<button class="btn small" data-equip="${gid}">장착</button>`;
-    else btn = `<button class="btn small" data-craft="${gid}" ${needSmithy || short ? 'disabled' : ''}>제작</button>`;
-    h += `<div class="tool">${tileImg(GEAR_TILE[gid], 20)}<span class="nm"><b>${g.name}</b> <span class="muted">${stat}</span>
-      ${owned ? '' : `<div class="cost">${costHTML(g.cost)}${g.coins ? `<span>${resImg('gold', 12)}${g.coins}동전</span>` : ''}
-      ${needSmithy ? `<span class="muted">대장간 Lv.${g.smithy} 필요</span>` : ''}</div>`}</span>${btn}</div>`;
-  }
-  return h + '<p class="muted">가죽은 늑대·쥐 같은 야생 몬스터에게서 얻어요. 마을 중심에서 멀어질수록 몬스터가 강해요.</p>';
-}
 setInterval(() => { if (S && (tab === 'news' || tab === 'people' || tab === 'build')) renderSide(); }, 5000);
 
 // ---------------- 지도 ----------------
@@ -909,6 +948,7 @@ document.addEventListener('keydown', (e) => {
     if (!e.repeat) spaceAction();
     else if (myMember() && myMember().job) send({ t: 'work' });
   } else if (e.code === 'Enter') { e.preventDefault(); releaseAll(); setTab('chat'); }
+  else if (e.code === 'KeyI') { e.preventDefault(); toggleGear(); }
 });
 document.addEventListener('keyup', (e) => { if (MOVE_KEYS[e.code]) held.delete(e.code); });
 

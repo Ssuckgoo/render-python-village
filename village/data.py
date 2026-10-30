@@ -15,23 +15,23 @@ GATHER = ["wood", "stone", "fish", "food", "ore"]
 
 # 자원별: 기본 분당 생산량, 생산 건물
 JOBS = {
-    "wood": {"rate": 3.0, "building": "lumber"},
-    "stone": {"rate": 2.4, "building": "quarry"},
-    "fish": {"rate": 2.0, "building": "dock"},
-    "food": {"rate": 3.0, "building": "farm"},
-    "ore": {"rate": 1.5, "building": "mine"},
+    "wood": {"rate": 12.0, "building": "lumber"},
+    "stone": {"rate": 10.0, "building": "quarry"},
+    "fish": {"rate": 8.0, "building": "dock"},
+    "food": {"rate": 12.0, "building": "farm"},
+    "ore": {"rate": 6.0, "building": "mine"},
 }
 # 한 칸에서 캘 수 있는 양과 다시 자라는 시간. 물고기는 무한
-RES_AMOUNT = {"wood": 20, "stone": 30, "ore": 18, "food": 10}
+RES_AMOUNT = {"wood": 60, "stone": 90, "ore": 50, "food": 30}
 REGROW = {"wood": 20 * 60, "stone": 30 * 60, "ore": 40 * 60, "food": 6 * 60}
 RETARGET_RADIUS = 6             # 자원이 떨어지면 이 거리 안의 같은 자원으로 옮겨 간다 (오프라인일 때)
 
 OFFLINE_CAP = 2 * 3600          # 걸어둔 일이 계속되는 시간 (여관 레벨당 +1시간)
 TOGETHER_BONUS = 0.3            # 같이 일하는 사람 1명당 +30% (최대 +100%)
 PLAYER_SPEED = 6.5              # 초당 타일
-ACTIVE_COOLDOWN = 1.5           # 열심히 일하기 재사용
+ACTIVE_COOLDOWN = 1.0           # 열심히 일하기 재사용
 ACTIVE_AMOUNT = 0.25            # x (1 + 분당 생산량)
-COIN_PER_UNIT = 0.1
+COIN_PER_UNIT = 0.05
 
 # ---------- 건물 ----------
 # cost: 레벨 1(또는 base_level+1)로 갈 때 비용. 이후 레벨마다 x1.8
@@ -88,7 +88,7 @@ def build_seconds(bid, level):
 
 
 def warehouse_cap(level):
-    return 300 * level * (level + 1) // 2
+    return 800 * level * (level + 1) // 2
 
 
 # ---------- 개인 ----------

@@ -39,6 +39,7 @@
     <span id="v-level" class="muted"></span>
     <span class="spacer"></span>
     <span id="v-online" class="muted"></span>
+    <button id="btn-gear" class="btn small">장비 (I)</button>
     <button id="btn-copy" class="btn small">초대 링크</button>
     <span id="v-code" class="code"></span>
   </header>
@@ -48,6 +49,13 @@
     <div class="stage-wrap">
       <canvas id="cv" width="960" height="600"></canvas>
       <div id="banner" class="banner" hidden></div>
+      <div id="win-gear" class="win" hidden>
+        <div class="win-head"><b>장비</b><span class="muted">I 키로 열고 닫기</span><span class="spacer"></span><button class="x" data-close>✕</button></div>
+        <div class="win-body">
+          <div id="gear-left" class="gear-left"></div>
+          <div id="gear-right" class="gear-right"></div>
+        </div>
+      </div>
     </div>
     <aside class="side">
       <nav class="tabs">
